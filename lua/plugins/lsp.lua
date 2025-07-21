@@ -16,6 +16,7 @@ return {
                     }
                 }
             })
+            lspconfig.texlab.setup({})
         end,
     },
 }
