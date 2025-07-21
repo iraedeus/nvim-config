@@ -10,7 +10,7 @@ opt.swapfile = false
 opt.backup = false
 local undodir = vim.fn.stdpath('data') .. '/undodir'
 if vim.fn.isdirectory(undodir) == 0 then
-  vim.fn.mkdir(undodir, 'p')
+    vim.fn.mkdir(undodir, 'p')
 end
 opt.undodir = undodir
 opt.undofile = true
