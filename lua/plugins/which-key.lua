@@ -1,8 +1,8 @@
 return {
-  {
-    "folke/which-key.nvim",
-    keys = "<leader>",
-    opts = {
+    {
+        "folke/which-key.nvim",
+        keys = "<leader>",
+        opts = {
+        },
     },
-  },
 }

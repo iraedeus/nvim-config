@@ -23,7 +23,3 @@ vim.keymap.set('n', '<leader>fh', builtin.help_tags, { desc = 'Telescope help ta
 vim.keymap.set('n', '<leader>gs', builtin.git_status, { desc = 'Telescope git status' })
 vim.keymap.set('n', '<leader>gc', builtin.git_commits, { desc = 'Telescope git commits' })
 vim.keymap.set('n', '<leader>gb', builtin.git_branches, { desc = 'Telescope git branches' })
-vim.keymap.set('n', '<leader>gr', builtin.lsp_references, { desc = 'Telescope references' })
-vim.keymap.set('n', '<leader>gd', builtin.lsp_definitions, { desc = 'Telescope go to definition' })
-
-
