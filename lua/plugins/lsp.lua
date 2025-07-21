@@ -16,6 +16,16 @@ return {
                     }
                 }
             })
+
+            lspconfig.pyright.setup({
+                settings = {
+                    python = {
+                        analysis = {
+                            diagnosticMode = "workspace",
+                        }
+                    }
+                }
+            })
         end,
     },
 }
