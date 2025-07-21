@@ -3,6 +3,10 @@ return {
         'neovim/nvim-lspconfig',
         config = function()
             local lspconfig = require('lspconfig')
+            vim.diagnostic.config({
+                virtual_text = true
+            })
+
             lspconfig.lua_ls.setup({
                 settings = {
                     Lua = {
@@ -11,10 +15,6 @@ return {
                         }
                     }
                 }
-            })
-
-            vim.diagnostic.config({
-                virtual_text = true
             })
         end,
     },

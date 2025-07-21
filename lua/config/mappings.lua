@@ -23,3 +23,9 @@ vim.keymap.set('n', '<leader>fh', builtin.help_tags, { desc = 'Telescope help ta
 vim.keymap.set('n', '<leader>gs', builtin.git_status, { desc = 'Telescope git status' })
 vim.keymap.set('n', '<leader>gc', builtin.git_commits, { desc = 'Telescope git commits' })
 vim.keymap.set('n', '<leader>gb', builtin.git_branches, { desc = 'Telescope git branches' })
+
+-- LSP saga
+vim.keymap.set('n', 'gd', '<cmd>Lspsaga peek_definition<CR>', { desc = 'LSP saga go to definition' })
+vim.keymap.set('n', 'gi', '<cmd>Lspsaga peek_implementation<CR>', { desc = 'LSP saga implementation' })
+vim.keymap.set('n', 'gr', '<cmd>Lspsaga finder<CR>', { desc = 'LSP saga references' })
+vim.keymap.set('n', 'K', '<cmd>Lspsaga hover_doc<CR>', { desc = 'LSP saga hover docs' })
