@@ -16,6 +16,8 @@ return {
                     }
                 }
             })
+
+            lspconfig.clangd.setup({})
         end,
     },
 }
