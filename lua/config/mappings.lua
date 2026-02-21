@@ -29,3 +29,15 @@ vim.keymap.set('n', 'gd', '<cmd>Lspsaga peek_definition<CR>', { desc = 'LSP saga
 vim.keymap.set('n', 'gi', '<cmd>Lspsaga peek_implementation<CR>', { desc = 'LSP saga implementation' })
 vim.keymap.set('n', 'gr', '<cmd>Lspsaga finder<CR>', { desc = 'LSP saga references' })
 vim.keymap.set('n', 'K', '<cmd>Lspsaga hover_doc<CR>', { desc = 'LSP saga hover docs' })
+
+-- DAP
+vim.keymap.set("n", "<Leader>db", function() require("dap").toggle_breakpoint() end,
+    { desc = "Debug: Toggle Breakpoint" })
+vim.keymap.set("n", "<Leader>dc", function() require("dap").continue() end, { desc = "Debug: Continue" })
+vim.keymap.set("n", "<Leader>do", function() require("dap").step_over() end, { desc = "Debug: Step Over" })
+vim.keymap.set("n", "<Leader>di", function() require("dap").step_into() end, { desc = "Debug: Step Into" })
+vim.keymap.set("n", "<Leader>du", function() require("dap").step_out() end, { desc = "Debug: Step Out" })
+vim.keymap.set("n", "<Leader>dr", function() require("dap").repl.open() end, { desc = "Debug: Open REPL" })
+vim.keymap.set("n", "<Leader>dl", function() require("dap").run_last() end, { desc = "Debug: Run Last" })
+vim.keymap.set("n", "<Leader>dt", function() require("dap").terminate() end, { desc = "Debug: Terminate" })
+vim.keymap.set("n", "<Leader>dui", function() require("dapui").toggle() end, { desc = "Debug: Toggle UI" })

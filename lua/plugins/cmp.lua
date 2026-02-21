@@ -48,6 +48,7 @@ return {
                 sources = cmp.config.sources({
                     { name = 'nvim_lsp' },
                     { name = 'vsnip' },
+                    { name = 'vimtex' },
                     -- { name = 'luasnip' }, -- Для пользователей luasnip
                     { name = 'buffer' },
                     { name = 'path' },
