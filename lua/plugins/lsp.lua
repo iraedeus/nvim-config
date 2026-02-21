@@ -28,6 +28,8 @@ return {
                 }
             })
 
+            lspconfig.texlab.setup({})
+
             lspconfig.pyright.setup({
                 on_attach = on_attach,
                 settings = {
