@@ -28,6 +28,8 @@ return {
                 }
             })
 
+            lspconfig.clangd.setup({})
+
             lspconfig.texlab.setup({})
 
             lspconfig.pyright.setup({
