@@ -70,7 +70,7 @@ local function do_rename_file(old_path, new_path)
                 if fp ~= old_path and fp ~= new_path then
                     local content = utils.read_file(fp)
                     if content then
-                        local nc, did = go.replace_imports(content, old_imp, new_imp)
+                        local nc, did = go.refactor_file(content, old_imp, new_imp)
                         if did then
                             utils.write_file(fp, nc)
                             total = total + 1
@@ -109,12 +109,11 @@ local function do_rename_dir(old_dir, new_dir)
     local root       = utils.find_project_root(vim.fn.fnamemodify(old_dir, ":h"))
     local old_prefix = old_dir .. "/"
 
-    -- save modified buffers that live inside the directory
     for _, buf in ipairs(vim.api.nvim_list_bufs()) do
         if vim.api.nvim_buf_is_loaded(buf) then
             local name = vim.api.nvim_buf_get_name(buf)
             if name:sub(1, #old_prefix) == old_prefix then
-                save_buf(buf)
+                save_buf(vim.fn.bufnr(name))
             end
         end
     end
@@ -130,10 +129,6 @@ local function do_rename_dir(old_dir, new_dir)
             for _, fp in ipairs(py_files) do
                 local content = utils.read_file(fp)
                 if content then
-                    -- Для файлов ВНУТРИ переименовываемой папки вычисляем
-                    -- source_package по спроецированному новому пути,
-                    -- чтобы их относительные импорты друг к другу
-                    -- не были ошибочно переписаны.
                     local pkg
                     if fp:sub(1, #old_prefix) == old_prefix then
                         local projected = new_dir .. "/" .. fp:sub(#old_prefix + 1)
@@ -160,12 +155,37 @@ local function do_rename_dir(old_dir, new_dir)
             local old_imp = go.dir_to_import(root, go_mod_name, old_dir)
             local new_imp = go.dir_to_import(root, go_mod_name, new_dir)
             if old_imp ~= new_imp then
+                local old_dir_name = old_dir:match("([^/]+)$")
+                local new_dir_name = new_dir:match("([^/]+)$")
+
                 for _, fp in ipairs(go_files) do
                     local content = utils.read_file(fp)
                     if content then
-                        local nc, did = go.replace_imports(content, old_imp, new_imp)
+                        local did_any = false
+
+                        -- файлы ВНУТРИ переименовываемой папки:
+                        -- обновляем package declaration
+                        if fp:sub(1, #old_prefix) == old_prefix then
+                            -- только файлы непосредственно в корне папки
+                            local rel = fp:sub(#old_prefix + 1)
+                            if not rel:find("/") then
+                                local nc, did = go.replace_package_decl(content, old_dir_name, new_dir_name)
+                                if did then
+                                    content = nc
+                                    did_any = true
+                                end
+                            end
+                        end
+
+                        -- обновляем import paths + usage
+                        local nc, did = go.refactor_file(content, old_imp, new_imp)
                         if did then
-                            utils.write_file(fp, nc)
+                            content = nc
+                            did_any = true
+                        end
+
+                        if did_any then
+                            utils.write_file(fp, content)
                             total = total + 1
                             utils.reload_buffer(fp)
                         end
@@ -175,14 +195,12 @@ local function do_rename_dir(old_dir, new_dir)
         end
     end
 
-    -- переименовываем саму директорию
     local ok, err = do_fs_rename(old_dir, new_dir)
     if not ok then
         vim.notify("import-rename: dir rename failed: " .. (err or "?"), vim.log.levels.ERROR)
         return
     end
 
-    -- обновляем пути у открытых буферов
     for _, buf in ipairs(vim.api.nvim_list_bufs()) do
         if vim.api.nvim_buf_is_loaded(buf) then
             local name = vim.api.nvim_buf_get_name(buf)
