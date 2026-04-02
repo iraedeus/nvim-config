@@ -1,5 +1,7 @@
-local M = {}
+local M     = {}
 local utils = require("custom.import-rename.utils")
+
+-- ─── module / import helpers ───────────────────────────────
 
 function M.get_module_name(root)
     local content = utils.read_file(utils.path_join(root, "go.mod"))
@@ -13,168 +15,185 @@ function M.dir_to_import(root, go_module, dirpath)
     return go_module .. "/" .. rel
 end
 
-function M.replace_imports(content, old_imp, new_imp)
-    local changed = false
-    local ok, parser = pcall(vim.treesitter.get_string_parser, content, "go")
+-- ─── treesitter import replacement ─────────────────────────
 
+function M.replace_imports(content, old_imp, new_imp)
+    local ok, parser = pcall(vim.treesitter.get_string_parser, content, "go")
     if not ok or not parser then return content, false end
 
     local tree = parser:parse()[1]
-    -- Ищем только пути импортов!
-    local query = vim.treesitter.query.parse("go", [[ (import_spec path: (string_literal) @path) ]])
+    local query = vim.treesitter.query.parse("go",
+        [[ (import_spec path: (string_literal) @path) ]])
     local replacements = {}
 
-    for id, node in query:iter_captures(tree:root(), content) do
+    for _, node in query:iter_captures(tree:root(), content) do
         local _, _, s = node:start()
         local _, _, e = node:end_()
-        local path = content:sub(s + 2, e - 1)
+        local path = content:sub(s + 2, e - 1) -- без кавычек
 
-        local new_text = nil
+        local new_text
         if path == old_imp then
             new_text = '"' .. new_imp .. '"'
-        else
-            local prefix = old_imp .. "/"
-            if path:sub(1, #prefix) == prefix then
-                new_text = '"' .. new_imp .. path:sub(#old_imp + 1) .. '"'
-            end
+        elseif path:sub(1, #old_imp + 1) == old_imp .. "/" then
+            new_text = '"' .. new_imp .. path:sub(#old_imp + 1) .. '"'
         end
 
         if new_text then
-            table.insert(replacements, { s = s, e = e, t = new_text })
+            replacements[#replacements + 1] = { s = s, e = e, t = new_text }
         end
     end
 
-    -- Применяем с конца в начало, чтобы не съехали индексы
-    if #replacements > 0 then
-        table.sort(replacements, function(a, b) return a.s > b.s end)
-        for _, r in ipairs(replacements) do
-            content = content:sub(1, r.s) .. r.t .. content:sub(r.e + 1)
-        end
-        changed = true
-    end
+    if #replacements == 0 then return content, false end
 
-    return content, changed
+    table.sort(replacements, function(a, b) return a.s > b.s end)
+    for _, r in ipairs(replacements) do
+        content = content:sub(1, r.s) .. r.t .. content:sub(r.e + 1)
+    end
+    return content, true
 end
+
+-- ─── usage + package decl ──────────────────────────────────
 
 function M.replace_usage(content, old_name, new_name)
     if old_name == new_name then return content, false end
-    local pat = "(%f[%w_])" .. vim.pesc(old_name) .. "(%s*%.)"
+    local pat  = "(%f[%w_])" .. vim.pesc(old_name) .. "(%s*%.)"
     local repl = "%1" .. new_name .. "%2"
     return utils.safe_gsub(content, pat, repl, "go")
 end
 
---- Обновляет `package old_name` → `package new_name`
---- Ищет первую строку с package declaration (пропускает комментарии).
 function M.replace_package_decl(content, old_name, new_name)
     if old_name == new_name then return content, false end
     local lines = vim.split(content, "\n", { plain = true })
-    local changed = false
     for i, line in ipairs(lines) do
         local pre, post = line:match(
-            "^(%s*package%s+)" .. vim.pesc(old_name) .. "(%s*)$"
-        )
+            "^(%s*package%s+)" .. vim.pesc(old_name) .. "(%s*)$")
         if pre then
             lines[i] = pre .. new_name .. post
-            changed = true
-            break -- одна package declaration на файл
+            return table.concat(lines, "\n"), true
         end
-    end
-    if changed then
-        return table.concat(lines, "\n"), true
     end
     return content, false
 end
 
---- Собирает информацию об импортах в файле:
---- возвращает список { import_path, alias_or_nil, pkg_name }
---- pkg_name — имя, используемое в коде (алиас или последний сегмент пути).
+-- ─── parse imports (regex) ─────────────────────────────────
+
 function M.parse_imports(content)
     local result = {}
+
+    local function add(alias, path)
+        result[#result + 1] = {
+            path     = path,
+            alias    = alias,
+            pkg_name = alias or path:match("([^/]+)$"),
+        }
+    end
 
     -- grouped: import ( ... )
     for block in content:gmatch("import%s*%((.-)%)") do
         for line in block:gmatch("[^\n]+") do
-            local alias, path = line:match('^%s*(%w+)%s+"([^"]+)"%s*$')
-            if not alias then
-                path = line:match('^%s*"([^"]+)"%s*$')
-            end
-            if path then
-                local pkg_name = alias or path:match("([^/]+)$")
-                result[#result + 1] = {
-                    path = path,
-                    alias = alias,
-                    pkg_name = pkg_name,
-                }
-            end
+            local a, p = line:match('^%s*(%w+)%s+"([^"]+)"%s*$')
+            if not a then p = line:match('^%s*"([^"]+)"%s*$') end
+            if p then add(a, p) end
         end
     end
 
-    -- single: import "path" or import alias "path"
+    -- single: import "path" / import alias "path"
     for full_line in content:gmatch("[^\n]+") do
         if full_line:match("^%s*import%s+") and not full_line:match("^%s*import%s*%(") then
-            local alias, path = full_line:match('^%s*import%s+(%w+)%s+"([^"]+)"%s*$')
-            if not alias then
-                path = full_line:match('^%s*import%s+"([^"]+)"%s*$')
-            end
-            if path then
-                local pkg_name = alias or path:match("([^/]+)$")
-                result[#result + 1] = {
-                    path = path,
-                    alias = alias,
-                    pkg_name = pkg_name,
-                }
-            end
+            local a, p = full_line:match('^%s*import%s+(%w+)%s+"([^"]+)"%s*$')
+            if not a then p = full_line:match('^%s*import%s+"([^"]+)"%s*$') end
+            if p then add(a, p) end
         end
     end
 
     return result
 end
 
---- Главная функция: обновляет import path + usage в одном файле.
---- old_imp/new_imp — полные import-пути (e.g. "example.com/proj/core")
---- Возвращает new_content, changed
-function M.refactor_file(content, old_imp, new_imp)
-    local changed = false
+-- ─── refactor one file ────────────────────────────────────
 
-    -- 1. Запоминаем, какие пакеты из старого пути импортированы без алиаса
+function M.refactor_file(content, old_imp, new_imp)
+    local changed      = false
     local old_dir_name = old_imp:match("([^/]+)$")
     local new_dir_name = new_imp:match("([^/]+)$")
 
-    local imports = M.parse_imports(content)
-    local needs_usage_rename = {}
-
-    for _, imp in ipairs(imports) do
-        -- проверяем: этот импорт совпадает с old_imp или является его подпакетом?
-        if imp.path == old_imp or imp.path:sub(1, #old_imp + 1) == old_imp .. "/" then
-            if not imp.alias then
-                -- без алиаса — неявно используется имя директории
-                local implicit_name = imp.path:match("([^/]+)$")
-                if imp.path == old_imp then
-                    -- прямой импорт переименовываемого пакета
-                    needs_usage_rename[implicit_name] = new_dir_name
-                end
-                -- для подпакетов implicit_name не меняется (e.g. sub остаётся sub)
-            end
+    -- определяем пакеты без алиаса, которым нужен rename usage
+    local needs_rename = {}
+    for _, imp in ipairs(M.parse_imports(content)) do
+        if not imp.alias
+            and (imp.path == old_imp or imp.path:sub(1, #old_imp + 1) == old_imp .. "/")
+            and imp.path == old_imp then
+            needs_rename[imp.path:match("([^/]+)$")] = new_dir_name
         end
     end
 
-    -- 2. Обновляем import paths
+    -- import paths
     local nc, did = M.replace_imports(content, old_imp, new_imp)
     if did then
-        content = nc
-        changed = true
+        content = nc; changed = true
     end
 
-    -- 3. Обновляем usage для пакетов без алиаса
-    for old_name, new_name in pairs(needs_usage_rename) do
+    -- usages
+    for old_name, new_name in pairs(needs_rename) do
         nc, did = M.replace_usage(content, old_name, new_name)
         if did then
-            content = nc
-            changed = true
+            content = nc; changed = true
         end
     end
 
     return content, changed
+end
+
+-- ─── collect_pending (вызывается из core) ──────────────────
+
+function M.collect_pending(root, old_path, new_path, is_dir)
+    if not is_dir and not old_path:match("%.go$") then return {} end
+
+    local go_mod = M.get_module_name(root)
+    if not go_mod then return {} end
+
+    local old_dir = is_dir and old_path or vim.fn.fnamemodify(old_path, ":h")
+    local new_dir = is_dir and new_path or vim.fn.fnamemodify(new_path, ":h")
+    local old_imp = M.dir_to_import(root, go_mod, old_dir)
+    local new_imp = M.dir_to_import(root, go_mod, new_dir)
+    if old_imp == new_imp then return {} end
+
+    local pending      = {}
+    local old_prefix   = is_dir and (old_path .. "/") or nil
+    local old_dir_name = is_dir and old_path:match("([^/]+)$") or nil
+    local new_dir_name = is_dir and new_path:match("([^/]+)$") or nil
+
+    for _, fp in ipairs(utils.collect_files(root, { ".go" })) do
+        if fp ~= old_path and fp ~= new_path then
+            local content = utils.read_file(fp)
+            if content then
+                local original = content
+                local did_any  = false
+
+                -- package decl для файлов непосредственно в переименованной директории
+                if is_dir and fp:sub(1, #old_prefix) == old_prefix
+                    and not fp:sub(#old_prefix + 1):find("/") then
+                    local nc, did = M.replace_package_decl(
+                        content, old_dir_name, new_dir_name)
+                    if did then
+                        content = nc; did_any = true
+                    end
+                end
+
+                local nc, did = M.refactor_file(content, old_imp, new_imp)
+                if did then
+                    content = nc; did_any = true
+                end
+
+                if did_any then
+                    pending[#pending + 1] = {
+                        filepath = fp, original = original, modified = content,
+                    }
+                end
+            end
+        end
+    end
+
+    return pending
 end
 
 return M
