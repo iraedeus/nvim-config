@@ -14,6 +14,12 @@ vim.keymap.set('n', '<leader>w', ':w<CR>', { desc = 'Save file' })
 vim.keymap.set('n', '<leader>n', ':Neotree toggle<CR>', { desc = 'Neotree open file manager' })
 vim.keymap.set('n', '<leader>b', ':Neotree buffers toggle<CR>', { desc = 'Neotree open buffers' })
 
+-- Import Rename
+vim.keymap.set('n', '<leader>rr', ':ImportRename<CR>', { desc = 'Rename file & update imports' })
+vim.keymap.set('n', '<leader>rm', ':ImportMove<CR>', { desc = 'Move file & update imports' })
+vim.keymap.set('n', '<leader>rR', ':ImportRenameDir<CR>', { desc = 'Rename dir and update imports' })
+vim.keymap.set('n', '<leader>rM', ':ImportMoveDir<CR>', { desc = 'Move dir and update imports' })
+
 -- Telescope
 local builtin = require('telescope.builtin')
 vim.keymap.set('n', '<leader>ff', builtin.find_files, { desc = 'Telescope find files' })
