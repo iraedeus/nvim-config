@@ -97,6 +97,31 @@ local function reload_buffer(filepath)
 end
 
 -- ============================================================
+-- Neo-tree: получить путь файла под курсором
+-- ============================================================
+
+local function get_neotree_file_path()
+    if vim.bo.filetype ~= "neo-tree" then
+        return nil, "Not in neo-tree"
+    end
+
+    local ok, manager = pcall(require, "neo-tree.sources.manager")
+    if not ok then return nil, "neo-tree not loaded" end
+
+    local state = manager.get_state("filesystem")
+    if not state or not state.tree then return nil, "no tree state" end
+
+    local node = state.tree:get_node()
+    if not node then return nil, "no node under cursor" end
+
+    if node.type ~= "file" then
+        return nil, "Cursor is not on a file"
+    end
+
+    return node.path, nil
+end
+
+-- ============================================================
 -- Python
 -- ============================================================
 
@@ -108,8 +133,6 @@ local function py_path_to_module(root, filepath)
     return rel
 end
 
---- Проверяет, является ли text модулем old_mod или его подмодулем.
---- Если да — заменяет префикс на new_mod.
 local function replace_module_ref(text, old_mod, new_mod)
     if text == old_mod then
         return new_mod, true
@@ -126,7 +149,6 @@ local function py_replace_imports(content, old_mod, new_mod)
     local lines = vim.split(content, "\n", { plain = true })
     local result = {}
 
-    -- Для случая "from parent import leaf"
     local old_parts = vim.split(old_mod, ".", { plain = true })
     local new_parts = vim.split(new_mod, ".", { plain = true })
     local old_leaf = old_parts[#old_parts]
@@ -141,18 +163,14 @@ local function py_replace_imports(content, old_mod, new_mod)
     for _, line in ipairs(lines) do
         local new_line = line
 
-        -- Пробуем "from MODULE import ..."
         local from_pre, from_mod, from_rest =
             line:match("^(%s*from%s+)([%w_%.]+)(%s+import.*)$")
 
         if from_pre then
-            -- Случай 1: from old_mod[.sub] import X
             local replaced, did = replace_module_ref(from_mod, old_mod, new_mod)
             if did then
                 new_line = from_pre .. replaced .. from_rest
                 changed = true
-
-                -- Случай 2: from parent import old_leaf
             elseif old_parent and from_mod == old_parent then
                 local kw, import_list = from_rest:match("^(%s+import%s+)(.*)$")
                 if kw and import_list then
@@ -181,12 +199,10 @@ local function py_replace_imports(content, old_mod, new_mod)
                 end
             end
         else
-            -- Пробуем standalone "import MODULE[, MODULE, ...]"
             local imp_pre, imp_list = line:match("^(%s*import%s+)(.+)$")
             if imp_pre then
                 local modules = vim.split(imp_list, ",", { plain = true })
                 local any = false
-
                 for i, m in ipairs(modules) do
                     local trimmed = vim.trim(m)
                     local mod_name, alias =
@@ -204,7 +220,6 @@ local function py_replace_imports(content, old_mod, new_mod)
                         end
                     end
                 end
-
                 if any then
                     new_line = imp_pre .. table.concat(modules, ",")
                     changed = true
@@ -255,10 +270,10 @@ local function go_replace_imports(content, old_imp, new_imp)
 end
 
 -- ============================================================
--- Core
+-- Core: переименование + обновление импортов
 -- ============================================================
 
-local function do_file_rename(old_path, new_path)
+local function do_rename_and_update(old_path, new_path)
     local root = find_project_root(vim.fn.fnamemodify(old_path, ":h"))
 
     local is_py = old_path:match("%.py$") ~= nil
@@ -268,10 +283,9 @@ local function do_file_rename(old_path, new_path)
         return
     end
 
-    -- Сохраняем буфер, пока файл ещё на старом месте
-    local cur_buf = vim.fn.bufnr(old_path)
-    if cur_buf ~= -1 and vim.bo[cur_buf].modified then
-        vim.api.nvim_buf_call(cur_buf, function()
+    local buf = vim.fn.bufnr(old_path)
+    if buf ~= -1 and vim.bo[buf].modified then
+        vim.api.nvim_buf_call(buf, function()
             vim.cmd("silent! write")
         end)
     end
@@ -321,7 +335,6 @@ local function do_file_rename(old_path, new_path)
         end
     end
 
-    -- Переименовываем файл на диске
     local new_parent = vim.fn.fnamemodify(new_path, ":h")
     if vim.fn.isdirectory(new_parent) == 0 then
         vim.fn.mkdir(new_parent, "p")
@@ -332,10 +345,9 @@ local function do_file_rename(old_path, new_path)
         return
     end
 
-    -- Обновляем буфер
-    if cur_buf ~= -1 then
-        vim.api.nvim_buf_set_name(cur_buf, new_path)
-        vim.api.nvim_buf_call(cur_buf, function()
+    if buf ~= -1 then
+        vim.api.nvim_buf_set_name(buf, new_path)
+        vim.api.nvim_buf_call(buf, function()
             vim.cmd("silent! edit!")
         end)
     end
@@ -352,68 +364,44 @@ local function do_file_rename(old_path, new_path)
 end
 
 -- ============================================================
--- Commands
+-- Setup
 -- ============================================================
 
 function M.setup()
-    vim.api.nvim_create_user_command("ImportRename", function(opts)
-        local old_path = vim.fn.expand("%:p")
-        if vim.fn.filereadable(old_path) == 0 then
-            vim.notify("import-rename: not a file on disk", vim.log.levels.ERROR)
-            return
-        end
+    -- Маппинг для neo-tree: <leader>rr
+    vim.api.nvim_create_autocmd("FileType", {
+        pattern = "neo-tree",
+        callback = function(ev)
+            vim.keymap.set("n", "<leader>rr", function()
+                local filepath, err = get_neotree_file_path()
+                if not filepath then
+                    vim.notify("import-rename: " .. (err or "unknown error"), vim.log.levels.ERROR)
+                    return
+                end
 
-        local function run(name)
-            if not name or name == "" then return end
-            local new_path = path_join(vim.fn.fnamemodify(old_path, ":h"), name)
-            if new_path == old_path then return end
-            do_file_rename(old_path, new_path)
-        end
+                local old_name = vim.fn.fnamemodify(filepath, ":t")
+                local dir = vim.fn.fnamemodify(filepath, ":h")
 
-        if opts.args ~= "" then
-            run(opts.args)
-        else
-            vim.ui.input({
-                prompt = "New file name: ",
-                default = vim.fn.expand("%:t"),
-            }, function(input)
-                vim.schedule(function() run(input) end)
-            end)
-        end
-    end, { nargs = "?", desc = "Rename file and update imports" })
+                vim.ui.input({
+                    prompt = "Rename to: ",
+                    default = old_name,
+                }, function(new_name)
+                    vim.schedule(function()
+                        if not new_name or new_name == "" or new_name == old_name then
+                            return
+                        end
+                        local new_path = path_join(dir, new_name)
+                        do_rename_and_update(filepath, new_path)
 
-    vim.api.nvim_create_user_command("ImportMove", function(opts)
-        local old_path = vim.fn.expand("%:p")
-        if vim.fn.filereadable(old_path) == 0 then
-            vim.notify("import-rename: not a file on disk", vim.log.levels.ERROR)
-            return
-        end
-
-        local function resolve(input)
-            if not input or input == "" then return nil end
-            if input:sub(1, 1) == "/" then return input end
-            if input:sub(1, 2) == "~/" then return vim.fn.expand(input) end
-            return path_join(vim.fn.getcwd(), input)
-        end
-
-        local function run(input)
-            local new_path = resolve(input)
-            if not new_path or new_path == old_path then return end
-            do_file_rename(old_path, new_path)
-        end
-
-        if opts.args ~= "" then
-            run(opts.args)
-        else
-            vim.ui.input({
-                prompt = "Move to: ",
-                default = vim.fn.fnamemodify(old_path, ":~:."),
-                completion = "file",
-            }, function(input)
-                vim.schedule(function() run(input) end)
-            end)
-        end
-    end, { nargs = "?", desc = "Move file and update imports", complete = "file" })
+                        -- Обновляем дерево neo-tree
+                        pcall(function()
+                            require("neo-tree.command").execute({ action = "refresh" })
+                        end)
+                    end)
+                end)
+            end, { buffer = ev.buf, desc = "Rename file + update imports" })
+        end,
+    })
 end
 
 return M
