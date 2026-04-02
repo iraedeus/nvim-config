@@ -1,8 +1,6 @@
 local M     = {}
 local utils = require("custom.import-rename.utils")
 
--- ─── module / package helpers ──────────────────────────────
-
 function M.path_to_module(root, filepath)
     local rel = filepath:sub(#root + 2)
     rel = rel:gsub("%.py$", ""):gsub("/__init__$", ""):gsub("/", ".")
@@ -52,8 +50,6 @@ local function replace_module_ref(text, old_mod, new_mod)
     return text, false
 end
 
--- ─── multiline block helpers ────────�
-��──────────────────────
 
 local function block_last(lines, start)
     local last, depth = start, 0
@@ -83,7 +79,6 @@ local function join_block(lines, first, last)
     return table.concat(parts, " "):gsub("%s+", " "):match("^%s*(.-)%s*$")
 end
 
--- ─── inline import extraction ──────────────────────────────
 
 local function extract_inline_prefix(line)
     for _, sep in ipairs({ ";%s*", ":%s*" }) do
@@ -95,13 +90,11 @@ local function extract_inline_prefix(line)
     return nil, nil
 end
 
--- ─── alias detection ───────────────────────────────────────
 
 local function name_has_alias(text, name)
     return text:match("%f[%w_]" .. vim.pesc(name) .. "%f[^%w_]%s+as%s+[%w_]+") ~= nil
 end
 
--- ─── in-place line replacements ────────────────────────────
 
 local function swap_from_module(lines, idx, old_str, new_str)
     local pre, post = lines[idx]:match(
@@ -147,7 +140,6 @@ local function swap_leaf(lines, first, last, oname, nname)
     return any
 end
 
--- ─── __all__ pass ──────────────────────────────────────────
 
 local function update_dunder_all(lines, old_leaf, new_leaf)
     if old_leaf == new_leaf then return false end
@@ -186,7 +178,6 @@ local function update_dunder_all(lines, old_leaf, new_leaf)
     return any
 end
 
--- ─── body refactoring ──────────────────────────────────────
 
 local function apply_body_renames(lines, leaf_rename, dotted_renames)
     local changed = false
@@ -217,8 +208,6 @@ local function apply_body_renames(lines, leaf_rename, dotted_renames)
     end
     return changed
 end
-
--- ─── main: replace_imports ─────────────────────────────────
 
 function M.replace_imports(content, old_mod, new_mod, source_package)
     local changed          = false
@@ -369,8 +358,6 @@ function M.replace_imports(content, old_mod, new_mod, source_package)
     if changed then return table.concat(lines, "\n"), true end
     return content, false
 end
-
--- ─── collect_pending (вызывается из core) ──────────────────
 
 function M.collect_pending(root, old_path, new_path, is_dir)
     if not is_dir and not old_path:match("%.py$") then return {} end

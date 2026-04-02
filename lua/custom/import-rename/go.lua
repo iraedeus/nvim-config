@@ -23,7 +23,7 @@ function M.replace_imports(content, old_imp, new_imp)
 
     local tree = parser:parse()[1]
     local query = vim.treesitter.query.parse("go",
-        [[ (import_spec path: (string_literal) @path) ]])
+        [[ (import_spec path: (interpreted_string_literal) @path) ]])
     local replacements = {}
 
     for _, node in query:iter_captures(tree:root(), content) do
