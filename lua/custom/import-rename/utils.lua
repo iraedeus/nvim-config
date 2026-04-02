@@ -3,7 +3,7 @@ local uv = vim.uv or vim.loop
 
 -- ─── backup storage ────────────────────────────────────────
 
-local _backup = nil -- { timestamp, root, changes = { [filepath] = content }, fs_rename = {old, new}, buf_renames = {{old,new}} }
+local _backup = nil
 
 function M.save_backup(data)
     _backup = vim.tbl_extend("force", { timestamp = os.time() }, data)
@@ -20,8 +20,7 @@ end
 -- ─── target validation ────────────────────────────────────
 
 function M.target_exists(path)
-    local stat = uv.fs_stat(path)
-    return stat ~= nil
+    return uv.fs_stat(path) ~= nil
 end
 
 -- ─── path helpers ──────────────────────────────────────────
