@@ -1,10 +1,9 @@
 return {
     {
-        dir = vim.fn.stdpath("config") .. "/lua/custom/import-rename",
         name = "import-rename",
-        event = "VeryLazy",
+        dir = vim.fn.stdpath("config") .. "/lua/custom/import-rename",
         config = function()
             require("custom.import-rename").setup()
         end,
-    },
+    }
 }
