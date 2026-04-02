@@ -21,31 +21,28 @@ local function do_fs_rename(old, new)
     return uv.fs_rename(old, new)
 end
 
--- ─── quickfix helpers ──────────────────────────────────────
+-- ─── gitsigns + quickfix ──────────────────────────────────
 
-local function diff_lines(filepath, original, modified)
-    local old_l = vim.split(original, "\n", { plain = true })
-    local new_l = vim.split(modified, "\n", { plain = true })
-    local entries = {}
-    local n = math.max(#old_l, #new_l)
-    for i = 1, n do
-        if old_l[i] ~= new_l[i] then
-            entries[#entries + 1] = {
-                filename = filepath,
-                lnum     = i,
-                col      = 1,
-                text     = string.format("%s → %s",
-                    vim.trim(old_l[i] or "<removed>"),
-                    vim.trim(new_l[i] or "<added>")),
-            }
-        end
-    end
-    return entries
+local function refresh_gitsigns()
+    vim.schedule(function()
+        local ok, gs = pcall(require, "gitsigns")
+        if not ok then return end
+        pcall(gs.refresh)
+    end)
 end
 
-local function set_quickfix(entries, title)
-    if #entries == 0 then return end
-    vim.fn.setqflist(entries, "r")
+local function populate_quickfix(changed_files, title)
+    if #changed_files == 0 then return end
+    local items = {}
+    for _, fp in ipairs(changed_files) do
+        items[#items + 1] = {
+            filename = fp,
+            lnum     = 1,
+            col      = 1,
+            text     = "imports updated",
+        }
+    end
+    vim.fn.setqflist(items, "r")
     vim.fn.setqflist({}, "a", { title = title or "Import Rename" })
 end
 
@@ -58,7 +55,6 @@ local function do_undo()
         return
     end
 
-    -- 1. reverse FS rename
     local fs = backup.fs_rename
     if fs then
         if not utils.target_exists(fs.new) then
@@ -85,8 +81,8 @@ local function do_undo()
         end
     end
 
-    -- 2. restore file contents (reverse path remap for dir renames)
     local restored = 0
+    local restored_files = {}
     for filepath, content in pairs(backup.changes) do
         local write_path = filepath
         if fs then
@@ -100,10 +96,13 @@ local function do_undo()
         utils.write_file(write_path, content)
         utils.reload_buffer(write_path)
         restored = restored + 1
+        restored_files[#restored_files + 1] = write_path
     end
 
     local age = os.time() - (backup.timestamp or 0)
     utils.clear_backup()
+
+    refresh_gitsigns()
 
     vim.notify(
         string.format("import-rename: undo complete — %d files restored (%ds ago)",
@@ -136,8 +135,8 @@ local function do_rename_file(old_path, new_path)
     local buf = vim.fn.bufnr(old_path)
     save_buf(buf)
 
-    -- ── collect changes (dry run) ──────────────────────────
-    local pending = {} -- { {filepath, original, modified} }
+    -- ── dry run ────────────────────────────────────────────
+    local pending = {}
 
     if is_py then
         local old_mod = py.path_to_module(root, old_path)
@@ -182,13 +181,13 @@ local function do_rename_file(old_path, new_path)
     -- ── apply ──────────────────────────────────────────────
     local function apply()
         local backup_changes = {}
-        local qf_entries = {}
+        local changed_files  = {}
 
         for _, c in ipairs(pending) do
             backup_changes[c.filepath] = c.original
+            changed_files[#changed_files + 1] = c.filepath
             utils.write_file(c.filepath, c.modified)
             utils.reload_buffer(c.filepath)
-            vim.list_extend(qf_entries, diff_lines(c.filepath, c.original, c.modified))
         end
 
         local ok, err = do_fs_rename(old_path, new_path)
@@ -214,14 +213,16 @@ local function do_rename_file(old_path, new_path)
             buf_renames = buf_renames,
         })
 
-        set_quickfix(qf_entries,
-            "Import Rename: " .. vim.fn.fnamemodify(old_path, ":t")
-            .. " → " .. vim.fn.fnamemodify(new_path, ":t"))
+        local title = string.format("Import Rename: %s → %s",
+            vim.fn.fnamemodify(old_path, ":t"),
+            vim.fn.fnamemodify(new_path, ":t"))
+        populate_quickfix(changed_files, title)
+        refresh_gitsigns()
 
         local hint = #pending > 0
-            and " — :copen for details, <leader>ru to undo" or ""
+            and " — :copen files, ]c/[c hunks, <leader>ru undo" or ""
         vim.notify(
-            string.format("import-rename: %s → %s (%d files updated)%s",
+            string.format("import-rename: %s → %s (%d files)%s",
                 vim.fn.fnamemodify(old_path, ":~:."),
                 vim.fn.fnamemodify(new_path, ":~:."),
                 #pending, hint),
@@ -234,12 +235,21 @@ local function do_rename_file(old_path, new_path)
 
     -- ── confirm ────────────────────────────────────────────
     if #pending > 0 then
+        local file_list = {}
+        for _, c in ipairs(pending) do
+            file_list[#file_list + 1] = "  • " .. vim.fn.fnamemodify(c.filepath, ":~:.")
+        end
+        local detail = table.concat(file_list, "\n")
+
         vim.ui.select({ "Yes", "No" }, {
             prompt = string.format(
-                "import-rename: %d file(s) will be modified. Proceed?", #pending),
+                "import-rename: %d file(s) will be modified:\n%s\nProceed?",
+                #pending, detail),
         }, function(choice)
             if choice == "Yes" then
                 vim.schedule(apply)
+            else
+                vim.notify("import-rename: cancelled", vim.log.levels.INFO)
             end
         end)
     else
@@ -271,7 +281,7 @@ local function do_rename_dir(old_dir, new_dir)
         end
     end
 
-    -- ── collect changes (dry run) ──────────────────────────
+    -- ── dry run ────────────────────────────────────────────
     local pending = {}
 
     -- Python
@@ -346,13 +356,13 @@ local function do_rename_dir(old_dir, new_dir)
     -- ── apply ──────────────────────────────────────────────
     local function apply()
         local backup_changes = {}
-        local qf_entries     = {}
+        local changed_files  = {}
 
         for _, c in ipairs(pending) do
             backup_changes[c.filepath] = c.original
+            changed_files[#changed_files + 1] = c.filepath
             utils.write_file(c.filepath, c.modified)
             utils.reload_buffer(c.filepath)
-            vim.list_extend(qf_entries, diff_lines(c.filepath, c.original, c.modified))
         end
 
         local ok, err = do_fs_rename(old_dir, new_dir)
@@ -366,7 +376,6 @@ local function do_rename_dir(old_dir, new_dir)
             return
         end
 
-        -- update loaded buffers inside renamed dir
         local buf_renames = {}
         for _, b in ipairs(vim.api.nvim_list_bufs()) do
             if vim.api.nvim_buf_is_loaded(b) then
@@ -380,36 +389,36 @@ local function do_rename_dir(old_dir, new_dir)
             end
         end
 
-        -- remap backup & qf paths for files inside renamed dir
-        local remapped = {}
+        -- remap paths: files inside renamed dir now live at new_dir/...
+        local remapped_changes = {}
+        local remapped_files   = {}
         for fp, content in pairs(backup_changes) do
             if fp:sub(1, #old_prefix) == old_prefix then
-                remapped[new_dir .. "/" .. fp:sub(#old_prefix + 1)] = content
+                local nfp = new_dir .. "/" .. fp:sub(#old_prefix + 1)
+                remapped_changes[nfp] = content
+                remapped_files[#remapped_files + 1] = nfp
             else
-                remapped[fp] = content
-            end
-        end
-        for _, entry in ipairs(qf_entries) do
-            local fn = entry.filename
-            if fn:sub(1, #old_prefix) == old_prefix then
-                entry.filename = new_dir .. "/" .. fn:sub(#old_prefix + 1)
+                remapped_changes[fp] = content
+                remapped_files[#remapped_files + 1] = fp
             end
         end
 
         utils.save_backup({
-            changes     = remapped,
+            changes     = remapped_changes,
             fs_rename   = { old = old_dir, new = new_dir },
             buf_renames = buf_renames,
         })
 
-        set_quickfix(qf_entries,
-            "Import Rename: " .. old_dir:match("([^/]+)$") .. "/"
-            .. " → " .. new_dir:match("([^/]+)$") .. "/")
+        local title = string.format("Import Rename: %s/ → %s/",
+            old_dir:match("([^/]+)$"),
+            new_dir:match("([^/]+)$"))
+        populate_quickfix(remapped_files, title)
+        refresh_gitsigns()
 
         local hint = #pending > 0
-            and " — :copen for details, <leader>ru to undo" or ""
+            and " — :copen files, ]c/[c hunks, <leader>ru undo" or ""
         vim.notify(
-            string.format("import-rename: %s/ → %s/ (%d files updated)%s",
+            string.format("import-rename: %s/ → %s/ (%d files)%s",
                 vim.fn.fnamemodify(old_dir, ":~:."),
                 vim.fn.fnamemodify(new_dir, ":~:."),
                 #pending, hint),
@@ -422,12 +431,21 @@ local function do_rename_dir(old_dir, new_dir)
 
     -- ── confirm ────────────────────────────────────────────
     if #pending > 0 then
+        local file_list = {}
+        for _, c in ipairs(pending) do
+            file_list[#file_list + 1] = "  • " .. vim.fn.fnamemodify(c.filepath, ":~:.")
+        end
+        local detail = table.concat(file_list, "\n")
+
         vim.ui.select({ "Yes", "No" }, {
             prompt = string.format(
-                "import-rename: %d file(s) will be modified. Proceed?", #pending),
+                "import-rename: %d file(s) will be modified:\n%s\nProceed?",
+                #pending, detail),
         }, function(choice)
             if choice == "Yes" then
                 vim.schedule(apply)
+            else
+                vim.notify("import-rename: cancelled", vim.log.levels.INFO)
             end
         end)
     else
@@ -479,7 +497,7 @@ function M.setup()
         end,
     })
 
-    -- global: undo (работает из любого буфера)
+    -- global: undo
     vim.keymap.set("n", "<leader>ru", "<cmd>ImportRenameUndo<cr>",
         { desc = "Undo last import-rename" })
 end

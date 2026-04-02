@@ -31,18 +31,25 @@ function M.replace_imports(content, old_imp, new_imp)
 end
 
 --- Обновляет `package old_name` → `package new_name`
---- в первой строке, которая содержит package declaration.
+--- Ищет первую строку с package declaration (пропускает комментарии).
 function M.replace_package_decl(content, old_name, new_name)
     if old_name == new_name then return content, false end
+    local lines = vim.split(content, "\n", { plain = true })
     local changed = false
-    local new_content = content:gsub(
-        "^(%s*package%s+)" .. vim.pesc(old_name) .. "(%s*)\n",
-        function(pre, post)
+    for i, line in ipairs(lines) do
+        local pre, post = line:match(
+            "^(%s*package%s+)" .. vim.pesc(old_name) .. "(%s*)$"
+        )
+        if pre then
+            lines[i] = pre .. new_name .. post
             changed = true
-            return pre .. new_name .. post .. "\n"
+            break -- одна package declaration на файл
         end
-    )
-    return new_content, changed
+    end
+    if changed then
+        return table.concat(lines, "\n"), true
+    end
+    return content, false
 end
 
 --- Собирает информацию об импортах в файле:
