@@ -102,14 +102,12 @@ end
 local function extract_inline_prefix(line)
     local prefix, rest
 
-    -- semicolon: x = 1; from pkg import mod
     prefix, rest = line:match("^(.-;%s*)(from%s+.*)$")
     if prefix then return prefix, rest end
 
     prefix, rest = line:match("^(.-;%s*)(import%s+.*)$")
     if prefix then return prefix, rest end
 
-    -- colon: if cond: from pkg import mod
     prefix, rest = line:match("^(.-:%s*)(from%s+.*)$")
     if prefix then return prefix, rest end
 
@@ -117,6 +115,15 @@ local function extract_inline_prefix(line)
     if prefix then return prefix, rest end
 
     return nil, nil
+end
+
+-- ────────────────────────────────────────────────────────────
+-- Alias detection
+-- ────────────────────────────────────────────────────────────
+
+local function name_has_alias(text, name)
+    local pat = "%f[%w_]" .. vim.pesc(name) .. "%f[^%w_]%s+as%s+[%w_]+"
+    return text:match(pat) ~= nil
 end
 
 -- ────────────────────────────────────────────────────────────
@@ -172,7 +179,6 @@ end
 
 -- ────────────────────────────────────────────────────────────
 -- __all__ pass
--- ────────────────────────────────────────────────────────────
 
 local function update_dunder_all(lines, old_leaf, new_leaf)
     if old_leaf == new_leaf then return false end
@@ -214,24 +220,64 @@ local function update_dunder_all(lines, old_leaf, new_leaf)
 end
 
 -- ────────────────────────────────────────────────────────────
+-- Body refactoring
+-- ────────────────────────────────────────────────────────────
+
+local function apply_body_renames(lines, leaf_rename, dotted_renames)
+    local changed = false
+
+    -- dotted renames first (longer, more specific patterns)
+    for _, r in ipairs(dotted_renames) do
+        local pat  = "(%f[%w_])" .. vim.pesc(r.old) .. "(%f[^%w_])"
+        local repl = "%1" .. r.new .. "%2"
+        for idx = 1, #lines do
+            local nl = lines[idx]:gsub(pat, repl)
+            if nl ~= lines[idx] then
+                lines[idx] = nl
+                changed = true
+            end
+        end
+    end
+
+    -- leaf rename (word boundary)
+    if leaf_rename then
+        local pat  = "(%f[%w_])" .. vim.pesc(leaf_rename.old) .. "(%f[^%w_])"
+        local repl = "%1" .. leaf_rename.new .. "%2"
+        for idx = 1, #lines do
+            local nl = lines[idx]:gsub(pat, repl)
+            if nl ~= lines[idx] then
+                lines[idx] = nl
+                changed = true
+            end
+        end
+    end
+
+    return changed
+end
+
+-- ────────────────────────────────────────────────────────────
 -- Main: replace_imports
 -- ────────────────────────────────────────────────────────────
 
 function M.replace_imports(content, old_mod, new_mod, source_package)
-    local changed      = false
-    local leaf_swapped = false
-    local lines        = vim.split(content, "\n", { plain = true })
+    local changed          = false
+    local leaf_swapped     = false
+    local lines            = vim.split(content, "\n", { plain = true })
 
-    local old_parts    = vim.split(old_mod, ".", { plain = true })
-    local new_parts    = vim.split(new_mod, ".", { plain = true })
-    local old_leaf     = old_parts[#old_parts]
-    local new_leaf     = new_parts[#new_parts]
-    local old_parent   = #old_parts > 1
+    local old_parts        = vim.split(old_mod, ".", { plain = true })
+    local new_parts        = vim.split(new_mod, ".", { plain = true })
+    local old_leaf         = old_parts[#old_parts]
+    local new_leaf         = new_parts[#new_parts]
+    local old_parent       = #old_parts > 1
         and table.concat(old_parts, ".", 1, #old_parts - 1) or nil
-    local new_parent   = #new_parts > 1
+    local new_parent       = #new_parts > 1
         and table.concat(new_parts, ".", 1, #new_parts - 1) or nil
 
-    local i            = 1
+    -- body refactoring tracking
+    local leaf_body_rename = false
+    local dotted_renames   = {}
+
+    local i                = 1
     while i <= #lines do
         local line = lines[i]
         local inline_prefix = nil
@@ -283,6 +329,9 @@ function M.replace_imports(content, old_mod, new_mod, source_package)
                         if swap_leaf(lines, first, last, old_leaf, new_leaf) then
                             need = true
                             leaf_swapped = true
+                            if not name_has_alias(joined, old_leaf) then
+                                leaf_body_rename = true
+                            end
                         end
                         if need then changed = true end
                     end
@@ -311,6 +360,9 @@ function M.replace_imports(content, old_mod, new_mod, source_package)
                         if swap_leaf(lines, first, last, old_leaf, new_leaf) then
                             need = true
                             leaf_swapped = true
+                            if not name_has_alias(joined, old_leaf) then
+                                leaf_body_rename = true
+                            end
                         end
                         if need then changed = true end
                     end
@@ -329,6 +381,13 @@ function M.replace_imports(content, old_mod, new_mod, source_package)
                                     if nl ~= lines[j] then lines[j] = nl end
                                 end
                                 changed = true
+                                -- track dotted body rename (only without alias)
+                                if not name_has_alias(joined, mod_name) then
+                                    dotted_renames[#dotted_renames + 1] = {
+                                        old = mod_name,
+                                        new = replaced,
+                                    }
+                                end
                             end
                         end
                     end
@@ -348,6 +407,17 @@ function M.replace_imports(content, old_mod, new_mod, source_package)
     -- __all__ pass
     if leaf_swapped then
         if update_dunder_all(lines, old_leaf, new_leaf) then
+            changed = true
+        end
+    end
+
+    -- body refactoring pass
+    local leaf_r = nil
+    if leaf_body_rename and old_leaf ~= new_leaf then
+        leaf_r = { old = old_leaf, new = new_leaf }
+    end
+    if leaf_r or #dotted_renames > 0 then
+        if apply_body_renames(lines, leaf_r, dotted_renames) then
             changed = true
         end
     end
