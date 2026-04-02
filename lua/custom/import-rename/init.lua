@@ -211,154 +211,265 @@ local function replace_module_ref(text, old_mod, new_mod)
     return text, false
 end
 
+
 local function py_replace_imports(content, old_mod, new_mod, source_package)
-    local changed = false
-    local lines = vim.split(content, "\n", { plain = true })
-    local result = {}
+    local changed      = false
+    local leaf_swapped = false -- ★
+    local lines        = vim.split(content, "\n", { plain = true })
 
-    local old_parts = vim.split(old_mod, ".", { plain = true })
-    local new_parts = vim.split(new_mod, ".", { plain = true })
-    local old_leaf = old_parts[#old_parts]
-    local new_leaf = new_parts[#new_parts]
-    local old_parent = #old_parts > 1
-        and table.concat(old_parts, ".", 1, #old_parts - 1)
-        or nil
-    local new_parent = #new_parts > 1
-        and table.concat(new_parts, ".", 1, #new_parts - 1)
-        or nil
+    local old_parts    = vim.split(old_mod, ".", { plain = true })
+    local new_parts    = vim.split(new_mod, ".", { plain = true })
+    local old_leaf     = old_parts[#old_parts]
+    local new_leaf     = new_parts[#new_parts]
+    local old_parent   = #old_parts > 1
+        and table.concat(old_parts, ".", 1, #old_parts - 1) or nil
+    local new_parent   = #new_parts > 1
+        and table.concat(new_parts, ".", 1, #new_parts - 1) or nil
 
-    for _, line in ipairs(lines) do
-        local new_line = line
+    ---------------------------------------------------------------------------
+    -- Helpers
+    ---------------------------------------------------------------------------
 
-        -- =======================================================
-        -- Относительные импорты: from .xxx import ... / from .. import ...
-        -- =======================================================
-        local rel_pre, rel_dots, rel_mod_part, rel_rest =
-            line:match("^(%s*from%s+)(%.+)([%w_%.]*)([ \t]+import.*)$")
+    local function block_last(start)
+        local last = start
+        local depth = 0
+        for c in lines[start]:gmatch(".") do
+            if c == "(" then depth = depth + 1 end
+            if c == ")" then depth = depth - 1 end
+        end
+        if depth > 0 then
+            while depth > 0 and last < #lines do
+                last = last + 1
+                for c in lines[last]:gmatch(".") do
+                    if c == "(" then depth = depth + 1 end
+                    if c == ")" then depth = depth - 1 end
+                end
+            end
+        elseif lines[start]:match("\\%s*$") then
+            while lines[last]:match("\\%s*$") and last < #lines do
+                last = last + 1
+            end
+        end
+        return last
+    end
 
-        if rel_pre and source_package then
-            local ndots = #rel_dots
+    local function join_block(first, last)
+        local parts = {}
+        for j = first, last do
+            local l = lines[j]:gsub("\\%s*$", ""):gsub("[()]", " ")
+            parts[#parts + 1] = l
+        end
+        return table.concat(parts, " "):gsub("%s+", " "):match("^%s*(.-)%s*$")
+    end
+
+    local function swap_from_module(idx, old_str, new_str)
+        local pre, post = lines[idx]:match(
+            "^(%s*from%s+)" .. vim.pesc(old_str) .. "(%s+import.*)$"
+        )
+        if not pre then
+            local s, e = lines[idx]:find(vim.pesc(old_str))
+            if s then
+                local before = lines[idx]:sub(1, s - 1)
+                if before:match("^%s*from%s+$") then
+                    pre  = before
+                    post = lines[idx]:sub(e + 1)
+                end
+            end
+        end
+        if pre then
+            lines[idx] = pre .. new_str .. post
+            return true
+        end
+        return false
+    end
+
+    local function swap_leaf(first, last, oname, nname)
+        if oname == nname then return false end
+        local pat  = "(%f[%w_])" .. vim.pesc(oname) .. "(%f[^%w_])"
+        local repl = "%1" .. nname .. "%2"
+        local any  = false
+        for j = first, last do
+            if j == first then
+                local pre, post = lines[j]:match("^(.-import%s)(.*)")
+                if pre and post then
+                    local np = post:gsub(pat, repl)
+                    if np ~= post then
+                        lines[j] = pre .. np
+                        any = true
+                    end
+                end
+            else
+                local nl = lines[j]:gsub(pat, repl)
+                if nl ~= lines[j] then
+                    lines[j] = nl
+                    any = true
+                end
+            end
+        end
+        return any
+    end
+
+    ---------------------------------------------------------------------------
+    -- Main import loop
+    ---------------------------------------------------------------------------
+    local i = 1
+    while i <= #lines do
+        local line = lines[i]
+        if not (line:match("^%s*from%s+") or line:match("^%s*import%s+")) then
+            i = i + 1
+            goto continue
+        end
+
+        local first  = i
+        local last   = block_last(first)
+        local joined = join_block(first, last)
+
+        -- ── relative from-import ────────────────────────────────�
+        �─────
+        local _, rel_dots, rel_mod_part, rel_rest =
+            joined:match("^(%s*from%s+)(%.+)([%w_%.]*)([ \t]+import.*)$")
+
+        if rel_dots and source_package then
+            local ndots    = #rel_dots
             local abs_from = py_resolve_relative(source_package, ndots, rel_mod_part)
             if abs_from then
-                local replaced_from, did_from = replace_module_ref(abs_from, old_mod, new_mod)
-                if did_from then
-                    -- Пробуем сохранить относительность с тем же кол-вом точек
-                    local new_dots_str, new_rel = py_make_relative(source_package, replaced_from, ndots)
-                    if new_dots_str then
-                        new_line = rel_pre .. new_dots_str .. new_rel .. rel_rest
-                    else
-                        -- Не получилось — пишем абсолютный
-                        new_line = rel_pre .. replaced_from .. rel_rest
-                    end
-                    changed = true
-                elseif old_parent and abs_from == old_parent then
-                    -- from .parent import leaf
-                    local kw, import_list = rel_rest:match("^([ \t]+import%s+)(.*)$")
-                    if kw and import_list then
-                        local new_from_abs = old_parent
-                        local new_list = import_list
-                        local need = false
+                local replaced_from, did_from =
+                    replace_module_ref(abs_from, old_mod, new_mod)
 
+                if did_from then
+                    local ds, rl = py_make_relative(
+                        source_package, replaced_from, ndots)
+                    local nms = ds and (ds .. rl) or replaced_from
+                    if swap_from_module(first,
+                            rel_dots .. rel_mod_part, nms) then
+                        changed = true
+                    end
+                elseif old_parent and abs_from == old_parent then
+                    local kw = rel_rest:match("^([ \t]+import%s+)")
+                    if kw then
+                        local need = false
                         if new_parent and old_parent ~= new_parent then
-                            new_from_abs = new_parent
-                            need = true
-                        end
-                        if old_leaf ~= new_leaf then
-                            local rl = import_list:gsub(
-                                "(%f[%w_])" .. vim.pesc(old_leaf) .. "(%f[^%w_])",
-                                "%1" .. new_leaf .. "%2"
-                            )
-                            if rl ~= import_list then
-                                new_list = rl
+                            local ds, rl = py_make_relative(
+                                source_package, new_parent, ndots)
+                            local nms = ds and (ds .. rl) or new_parent
+                            if swap_from_module(first,
+                                    rel_dots .. rel_mod_part, nms) then
                                 need = true
                             end
                         end
-                        if need then
-                            local new_dots_str, new_rel = py_make_relative(source_package, new_from_abs, ndots)
-                            if new_dots_str then
-                                new_line = rel_pre .. new_dots_str .. new_rel .. kw .. new_list
-                            else
-                                new_line = rel_pre .. new_from_abs .. kw .. new_list
-                            end
-                            changed = true
+                        if swap_leaf(first, last, old_leaf, new_leaf) then
+                            need = true
+                            leaf_swapped = true -- ★
                         end
+                        if need then changed = true end
                     end
                 end
             end
         else
-            -- =======================================================
-            -- Абсолютные импорты
-            -- =======================================================
-            local from_pre, from_mod, from_rest =
-                line:match("^(%s*from%s+)([%w_%.]+)(%s+import.*)$")
+            -- ── absolute from-import ──────────────────────────────────
+            local _, from_mod, from_rest =
+                joined:match("^(%s*from%s+)([%w_%.]+)(%s+import.*)$")
 
-            if from_pre then
-                local replaced, did = replace_module_ref(from_mod, old_mod, new_mod)
+            if from_mod then
+                local replaced, did =
+                    replace_module_ref(from_mod, old_mod, new_mod)
                 if did then
-                    new_line = from_pre .. replaced .. from_rest
-                    changed = true
+                    if swap_from_module(first, from_mod, replaced) then
+                        changed = true
+                    end
                 elseif old_parent and from_mod == old_parent then
-                    local kw, import_list = from_rest:match("^(%s+import%s+)(.*)$")
-                    if kw and import_list then
-                        local new_from = old_parent
-                        local new_list = import_list
+                    local kw = from_rest:match("^(%s+import%s+)")
+                    if kw then
                         local need = false
-
                         if new_parent and old_parent ~= new_parent then
-                            new_from = new_parent
-                            need = true
-                        end
-                        if old_leaf ~= new_leaf then
-                            local rl = import_list:gsub(
-                                "(%f[%w_])" .. vim.pesc(old_leaf) .. "(%f[^%w_])",
-                                "%1" .. new_leaf .. "%2"
-                            )
-                            if rl ~= import_list then
-                                new_list = rl
+                            if swap_from_module(first,
+                                    old_parent, new_parent) then
                                 need = true
                             end
                         end
-                        if need then
-                            new_line = from_pre .. new_from .. kw .. new_list
-                            changed = true
+                        if swap_leaf(first, last, old_leaf, new_leaf) then
+                            need = true
+                            leaf_swapped = true -- ★
                         end
+                        if need then changed = true end
                     end
                 end
             else
-                local imp_pre, imp_list = line:match("^(%s*import%s+)(.+)$")
-                if imp_pre then
-                    local modules = vim.split(imp_list, ",", { plain = true })
-                    local any = false
-                    for i, m in ipairs(modules) do
-                        local trimmed = vim.trim(m)
-                        local mod_name, alias =
-                            trimmed:match("^([%w_%.]+)(%s+as%s+[%w_]+)$")
-                        if not mod_name then
-                            mod_name = trimmed:match("^([%w_%.]+)$")
-                            alias = ""
-                        end
+                -- ── plain import ──────────────────────────────────────
+                local imp_list = joined:match("^%s*import%s+(.+)$")
+                if imp_list then
+                    for _, m in
+                    ipairs(vim.split(imp_list, ",", { plain = true }))
+                    do
+                        local mod_name = vim.trim(m):match("^([%w_%.]+)")
                         if mod_name then
-                            local replaced, did = replace_module_ref(mod_name, old_mod, new_mod)
+                            local replaced, did =
+                                replace_module_ref(mod_name, old_mod, new_mod)
                             if did then
-                                local leading = m:match("^(%s*)") or ""
-                                modules[i] = leading .. replaced .. (alias or "")
-                                any = true
+                                for j = first, last do
+                                    local nl = lines[j]:gsub(
+                                        vim.pesc(mod_name), replaced, 1)
+                                    if nl ~= lines[j] then
+                                        lines[j] = nl
+                                    end
+                                end
+                                changed = true
                             end
                         end
-                    end
-                    if any then
-                        new_line = imp_pre .. table.concat(modules, ",")
-                        changed = true
                     end
                 end
             end
         end
 
-        table.insert(result, new_line)
+        i = last + 1
+        ::continue::
+    end
+
+    ---------------------------------------------------------------------------
+    -- ★ __all__ string references                                          ★
+    ---------------------------------------------------------------------------
+    if old_leaf ~= new_leaf and leaf_swapped then
+        local in_all  = false
+        local depth   = 0
+        local dq_pat  = '"' .. vim.pesc(old_leaf) .. '"'
+        local sq_pat  = "'" .. vim.pesc(old_leaf) .. "'"
+        local dq_repl = '"' .. new_leaf .. '"'
+        local sq_repl = "'" .. new_leaf .. "'"
+
+        for idx = 1, #lines do
+            local l = lines[idx]
+
+            if not in_all then
+                if l:match("^%s*__all__%s*%+?%s*=%s*[%[%(]")
+                    or l:match("^%s*__all__%s*:.-=%s*[%[%(]")
+                    or l:match("__all__%.append%s*%(")
+                    or l:match("__all__%.extend%s*%(")
+                    or l:match("__all__%.insert%s*%(")
+                then
+                    in_all = true
+                    depth  = 0
+                end
+            end
+
+            if in_all then
+                for c in l:gmatch(".") do
+                    if c == "[" or c == "(" then depth = depth + 1 end
+                    if c == "]" or c == ")" then depth = depth - 1 end
+                end
+
+                local nl = l:gsub(dq_pat, dq_repl):gsub(sq_pat, sq_repl)
+                if nl ~= l then
+                    lines[idx] = nl
+                    changed = true
+                end
+
+                if depth <= 0 then in_all = false end
+            end
+        end
     end
 
     if changed then
-        return table.concat(result, "\n"), true
+        return table.concat(lines, "\n"), true
     end
     return content, false
 end
@@ -531,3 +642,4 @@ function M.setup()
 end
 
 return M
+
