@@ -15,19 +15,52 @@ end
 
 function M.replace_imports(content, old_imp, new_imp)
     local changed = false
-    local new_content = content:gsub('"([^"\n]+)"', function(path)
+    local ok, parser = pcall(vim.treesitter.get_string_parser, content, "go")
+
+    if not ok or not parser then return content, false end
+
+    local tree = parser:parse()[1]
+    -- Ищем только пути импортов!
+    local query = vim.treesitter.query.parse("go", [[ (import_spec path: (string_literal) @path) ]])
+    local replacements = {}
+
+    for id, node in query:iter_captures(tree:root(), content) do
+        local _, _, s = node:start()
+        local _, _, e = node:end_()
+        local path = content:sub(s + 2, e - 1)
+
+        local new_text = nil
         if path == old_imp then
-            changed = true
-            return '"' .. new_imp .. '"'
+            new_text = '"' .. new_imp .. '"'
+        else
+            local prefix = old_imp .. "/"
+            if path:sub(1, #prefix) == prefix then
+                new_text = '"' .. new_imp .. path:sub(#old_imp + 1) .. '"'
+            end
         end
-        local prefix = old_imp .. "/"
-        if path:sub(1, #prefix) == prefix then
-            changed = true
-            return '"' .. new_imp .. path:sub(#old_imp + 1) .. '"'
+
+        if new_text then
+            table.insert(replacements, { s = s, e = e, t = new_text })
         end
-        return '"' .. path .. '"'
-    end)
-    return new_content, changed
+    end
+
+    -- Применяем с конца в начало, чтобы не съехали индексы
+    if #replacements > 0 then
+        table.sort(replacements, function(a, b) return a.s > b.s end)
+        for _, r in ipairs(replacements) do
+            content = content:sub(1, r.s) .. r.t .. content:sub(r.e + 1)
+        end
+        changed = true
+    end
+
+    return content, changed
+end
+
+function M.replace_usage(content, old_name, new_name)
+    if old_name == new_name then return content, false end
+    local pat = "(%f[%w_])" .. vim.pesc(old_name) .. "(%s*%.)"
+    local repl = "%1" .. new_name .. "%2"
+    return utils.safe_gsub(content, pat, repl, "go")
 end
 
 --- Обновляет `package old_name` → `package new_name`
@@ -95,17 +128,6 @@ function M.parse_imports(content)
     end
 
     return result
-end
-
---- Обновляет использования пакета в коде:
---- `old_name.Func()` → `new_name.Func()`
---- Только для импортов БЕЗ пользовательского алиаса.
-function M.replace_usage(content, old_name, new_name)
-    if old_name == new_name then return content, false end
-    local pat = "(%f[%w_])" .. vim.pesc(old_name) .. "(%s*%.)"
-    local repl = "%1" .. new_name .. "%2"
-    local new_content, count = content:gsub(pat, repl)
-    return new_content, count > 0
 end
 
 --- Главная функция: обновляет import path + usage в одном файле.

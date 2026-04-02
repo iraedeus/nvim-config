@@ -120,4 +120,81 @@ function M.reload_buffer(filepath)
     end
 end
 
+-- ─── Treesitter safe substitution (Range-based) ────────────
+
+local ts = vim.treesitter
+
+--- Применяет gsub, игнорируя участки, попавшие в строки или комментарии
+function M.safe_gsub(content, pattern, repl, filetype)
+    local ok, parser = pcall(ts.get_string_parser, content, filetype)
+    if not ok or not parser then
+        local nc, c = content:gsub(pattern, repl)
+        return nc, c > 0
+    end
+
+    local tree = parser:parse()[1]
+    if not tree then
+        local nc, c = content:gsub(pattern, repl)
+        return nc, c > 0
+    end
+
+    local query_str = filetype == "python"
+        and "(string) @ignore (comment) @ignore (interpolation) @unignore"
+        or "(comment) @ignore (interpreted_string_literal) @ignore (raw_string_literal) @ignore (rune_literal) @ignore"
+
+    local ok_q, query = pcall(ts.query.parse, filetype, query_str)
+    if not ok_q or not query then
+        local nc, c = content:gsub(pattern, repl)
+        return nc, c > 0
+    end
+
+    -- Собираем только координаты диапазонов (это крошечные массивы)
+    local ignore_ranges = {}
+    local unignore_ranges = {}
+
+    for id, node in query:iter_captures(tree:root(), content) do
+        local name = query.captures[id]
+        local _, _, s = node:start()
+        local _, _, e = node:end_()
+        if name == "ignore" then
+            table.insert(ignore_ranges, { s = s + 1, e = e })
+        elseif name == "unignore" then
+            table.insert(unignore_ranges, { s = s + 1, e = e })
+        end
+    end
+
+    local changed = false
+    -- Трюк Lua: пустые скобки () возвращают индекс начала совпадения
+    local safe_pattern = "()(" .. pattern .. ")"
+
+    local new_content = content:gsub(safe_pattern, function(pos, full_match)
+        local is_ignored = false
+
+        -- Проверяем, попало ли слово внутрь строки/комментария
+        for _, r in ipairs(ignore_ranges) do
+            if pos >= r.s and pos <= r.e then
+                is_ignored = true
+                break
+            end
+        end
+
+        -- Если это f-строка, проверяем, не попали ли мы в её интерполяцию {...}
+        if is_ignored then
+            for _, r in ipairs(unignore_ranges) do
+                if pos >= r.s and pos <= r.e then
+                    is_ignored = false
+                    break
+                end
+            end
+        end
+
+        if is_ignored then return nil end -- пропускаем замену
+
+        changed = true
+        return full_match:gsub(pattern, repl)
+    end)
+
+    return new_content, changed
+end
+
 return M

@@ -224,32 +224,39 @@ end
 -- ────────────────────────────────────────────────────────────
 
 local function apply_body_renames(lines, leaf_rename, dotted_renames)
+    local utils = require("custom.import-rename.utils")
     local changed = false
+    -- Склеиваем весь код в один текст
+    local content = table.concat(lines, "\n")
 
-    -- dotted renames first (longer, more specific patterns)
+    -- 1. Длинные пути (dotted renames)
     for _, r in ipairs(dotted_renames) do
-        local pat  = "(%f[%w_])" .. vim.pesc(r.old) .. "(%f[^%w_])"
-        local repl = "%1" .. r.new .. "%2"
-        for idx = 1, #lines do
-            local nl = lines[idx]:gsub(pat, repl)
-            if nl ~= lines[idx] then
-                lines[idx] = nl
-                changed = true
-            end
+        local pat     = "(%f[%w_])" .. vim.pesc(r.old) .. "(%f[^%w_])"
+        local repl    = "%1" .. r.new .. "%2"
+        -- Применяем безопасную замену (не трогает строки и комменты)
+        local nc, did = utils.safe_gsub(content, pat, repl, "python")
+        if did then
+            content = nc
+            changed = true
         end
     end
 
-    -- leaf rename (word boundary)
+    -- 2. Короткие имена (leaf rename)
     if leaf_rename then
-        local pat  = "(%f[%w_])" .. vim.pesc(leaf_rename.old) .. "(%f[^%w_])"
-        local repl = "%1" .. leaf_rename.new .. "%2"
-        for idx = 1, #lines do
-            local nl = lines[idx]:gsub(pat, repl)
-            if nl ~= lines[idx] then
-                lines[idx] = nl
-                changed = true
-            end
+        local pat     = "(%f[%w_])" .. vim.pesc(leaf_rename.old) .. "(%f[^%w_])"
+        local repl    = "%1" .. leaf_rename.new .. "%2"
+        local nc, did = utils.safe_gsub(content, pat, repl, "python")
+        if did then
+            content = nc
+            changed = true
         end
+    end
+
+    -- Если были изменения, возвращаем их обратно в массив lines
+    if changed then
+        local new_lines = vim.split(content, "\n", { plain = true })
+        for i = #lines, 1, -1 do lines[i] = nil end
+        for i, l in ipairs(new_lines) do lines[i] = l end
     end
 
     return changed
