@@ -132,7 +132,7 @@ local function do_undo()
         vim.log.levels.INFO)
 
     pcall(function()
-        require("neo-tree.command").execute({ action = "refresh" })
+        require("neo-tree.sources.manager").refresh("filesystem")
     end)
 end
 
@@ -247,7 +247,7 @@ local function confirm_and_apply(pending, fs_old, fs_new, buf, is_dir, callback)
         end
         if callback then callback(ok) end
         pcall(function()
-            require("neo-tree.command").execute({ action = "refresh" })
+            require("neo-tree.sources.manager").refresh("filesystem")
         end)
     end
 
