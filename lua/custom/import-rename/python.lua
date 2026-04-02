@@ -96,6 +96,30 @@ local function join_block(lines, first, last)
 end
 
 -- ────────────────────────────────────────────────────────────
+-- Inline import extraction
+-- ────────────────────────────────────────────────────────────
+
+local function extract_inline_prefix(line)
+    local prefix, rest
+
+    -- semicolon: x = 1; from pkg import mod
+    prefix, rest = line:match("^(.-;%s*)(from%s+.*)$")
+    if prefix then return prefix, rest end
+
+    prefix, rest = line:match("^(.-;%s*)(import%s+.*)$")
+    if prefix then return prefix, rest end
+
+    -- colon: if cond: from pkg import mod
+    prefix, rest = line:match("^(.-:%s*)(from%s+.*)$")
+    if prefix then return prefix, rest end
+
+    prefix, rest = line:match("^(.-:%s*)(import%s+.*)$")
+    if prefix then return prefix, rest end
+
+    return nil, nil
+end
+
+-- ────────────────────────────────────────────────────────────
 -- In-place line replacements
 -- ────────────────────────────────────────────────────────────
 
@@ -210,9 +234,18 @@ function M.replace_imports(content, old_mod, new_mod, source_package)
     local i            = 1
     while i <= #lines do
         local line = lines[i]
+        local inline_prefix = nil
+
         if not (line:match("^%s*from%s+") or line:match("^%s*import%s+")) then
-            i = i + 1
-            goto continue
+            local prefix, rest = extract_inline_prefix(line)
+            if prefix then
+                inline_prefix = prefix
+                lines[i] = rest
+                line = rest
+            else
+                i = i + 1
+                goto continue
+            end
         end
 
         local first                               = i
@@ -301,6 +334,11 @@ function M.replace_imports(content, old_mod, new_mod, source_package)
                     end
                 end
             end
+        end
+
+        -- restore inline prefix
+        if inline_prefix then
+            lines[first] = inline_prefix .. lines[first]
         end
 
         i = last + 1
