@@ -5,7 +5,25 @@ local py      = require("custom.import-rename.python")
 local go      = require("custom.import-rename.go")
 local neotree = require("custom.import-rename.neotree")
 
-local function do_rename_and_update(old_path, new_path)
+-- ─── helpers ───────────────────────────────────────────────
+
+local function save_buf(bufnr)
+    if bufnr ~= -1 and vim.bo[bufnr].modified then
+        vim.api.nvim_buf_call(bufnr, function() vim.cmd("silent! write") end)
+    end
+end
+
+local function do_fs_rename(old, new)
+    local parent = vim.fn.fnamemodify(new, ":h")
+    if vim.fn.isdirectory(parent) == 0 then
+        vim.fn.mkdir(parent, "p")
+    end
+    return uv.fs_rename(old, new)
+end
+
+-- ─── file rename ───────────────────────────────────────────
+
+local function do_rename_file(old_path, new_path)
     local root = utils.find_project_root(vim.fn.fnamemodify(old_path, ":h"))
 
     local is_py = old_path:match("%.py$") ~= nil
@@ -16,9 +34,7 @@ local function do_rename_and_update(old_path, new_path)
     end
 
     local buf = vim.fn.bufnr(old_path)
-    if buf ~= -1 and vim.bo[buf].modified then
-        vim.api.nvim_buf_call(buf, function() vim.cmd("silent! write") end)
-    end
+    save_buf(buf)
 
     local total = 0
 
@@ -66,12 +82,7 @@ local function do_rename_and_update(old_path, new_path)
         end
     end
 
-    -- Rename the file itself
-    local new_parent = vim.fn.fnamemodify(new_path, ":h")
-    if vim.fn.isdirectory(new_parent) == 0 then
-        vim.fn.mkdir(new_parent, "p")
-    end
-    local ok, err = uv.fs_rename(old_path, new_path)
+    local ok, err = do_fs_rename(old_path, new_path)
     if not ok then
         vim.notify("import-rename: rename failed: " .. (err or "?"), vim.log.levels.ERROR)
         return
@@ -83,26 +94,125 @@ local function do_rename_and_update(old_path, new_path)
     end
 
     vim.notify(
-        string.format(
-            "import-rename: %s → %s (%d files updated)",
+        string.format("import-rename: %s → %s (%d files updated)",
             vim.fn.fnamemodify(old_path, ":~:."),
-            vim.fn.fnamemodify(new_path, ":~:."),
-            total
-        ),
-        vim.log.levels.INFO
-    )
+            vim.fn.fnamemodify(new_path, ":~:."), total),
+        vim.log.levels.INFO)
 end
+
+-- ─── directory rename ──────────────────────────────────────
+
+local function do_rename_dir(old_dir, new_dir)
+    old_dir          = old_dir:gsub("/+$", "")
+    new_dir          = new_dir:gsub("/+$", "")
+
+    local root       = utils.find_project_root(vim.fn.fnamemodify(old_dir, ":h"))
+    local old_prefix = old_dir .. "/"
+
+    -- save modified buffers that live inside the directory
+    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+        if vim.api.nvim_buf_is_loaded(buf) then
+            local name = vim.api.nvim_buf_get_name(buf)
+            if name:sub(1, #old_prefix) == old_prefix then
+                save_buf(buf)
+            end
+        end
+    end
+
+    local total = 0
+
+    -- ── Python ──────────────────────────────────
+    local py_files = utils.collect_files(root, { ".py" })
+    if #py_files > 0 then
+        local old_mod = py.path_to_module(root, old_dir)
+        local new_mod = py.path_to_module(root, new_dir)
+        if old_mod ~= new_mod then
+            for _, fp in ipairs(py_files) do
+                local content = utils.read_file(fp)
+                if content then
+                    -- Для файлов ВНУТРИ переименовываемой папки вычисляем
+                    -- source_package по спроецированному новому пути,
+                    -- чтобы их относительные импорты друг к другу
+                    -- не были ошибочно переписаны.
+                    local pkg
+                    if fp:sub(1, #old_prefix) == old_prefix then
+                        local projected = new_dir .. "/" .. fp:sub(#old_prefix + 1)
+                        pkg = py.get_package(root, projected)
+                    else
+                        pkg = py.get_package(root, fp)
+                    end
+                    local nc, did = py.replace_imports(content, old_mod, new_mod, pkg)
+                    if did then
+                        utils.write_file(fp, nc)
+                        total = total + 1
+                        utils.reload_buffer(fp)
+                    end
+                end
+            end
+        end
+    end
+
+    -- ── Go ──────────────────────────────────────
+    local go_files = utils.collect_files(root, { ".go" })
+    if #go_files > 0 then
+        local go_mod_name = go.get_module_name(root)
+        if go_mod_name then
+            local old_imp = go.dir_to_import(root, go_mod_name, old_dir)
+            local new_imp = go.dir_to_import(root, go_mod_name, new_dir)
+            if old_imp ~= new_imp then
+                for _, fp in ipairs(go_files) do
+                    local content = utils.read_file(fp)
+                    if content then
+                        local nc, did = go.replace_imports(content, old_imp, new_imp)
+                        if did then
+                            utils.write_file(fp, nc)
+                            total = total + 1
+                            utils.reload_buffer(fp)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- переименовываем саму директорию
+    local ok, err = do_fs_rename(old_dir, new_dir)
+    if not ok then
+        vim.notify("import-rename: dir rename failed: " .. (err or "?"), vim.log.levels.ERROR)
+        return
+    end
+
+    -- обновляем пути у открытых буферов
+    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+        if vim.api.nvim_buf_is_loaded(buf) then
+            local name = vim.api.nvim_buf_get_name(buf)
+            if name:sub(1, #old_prefix) == old_prefix then
+                local new_name = new_dir .. "/" .. name:sub(#old_prefix + 1)
+                vim.api.nvim_buf_set_name(buf, new_name)
+                vim.api.nvim_buf_call(buf, function() vim.cmd("silent! edit!") end)
+            end
+        end
+    end
+
+    vim.notify(
+        string.format("import-rename: %s/ → %s/ (%d files updated)",
+            vim.fn.fnamemodify(old_dir, ":~:."),
+            vim.fn.fnamemodify(new_dir, ":~:."), total),
+        vim.log.levels.INFO)
+end
+
+-- ─── setup ─────────────────────────────────────────────────
 
 function M.setup()
     vim.api.nvim_create_user_command("ImportRename", function()
-        local filepath, err = neotree.get_file_path()
-        if not filepath then
+        local path, node_type, err = neotree.get_node_info()
+        if not path then
             vim.notify("import-rename: " .. (err or "unknown error"), vim.log.levels.ERROR)
             return
         end
 
-        local old_name = vim.fn.fnamemodify(filepath, ":t")
-        local dir = vim.fn.fnamemodify(filepath, ":h")
+        local old_name = vim.fn.fnamemodify(path, ":t")
+        local parent   = vim.fn.fnamemodify(path, ":h")
 
         vim.ui.input({
             prompt = "Rename to: ",
@@ -112,20 +222,24 @@ function M.setup()
                 if not new_name or new_name == "" or new_name == old_name then
                     return
                 end
-                local new_path = utils.path_join(dir, new_name)
-                do_rename_and_update(filepath, new_path)
+                local new_path = utils.path_join(parent, new_name)
+                if node_type == "directory" then
+                    do_rename_dir(path, new_path)
+                else
+                    do_rename_file(path, new_path)
+                end
                 pcall(function()
                     require("neo-tree.command").execute({ action = "refresh" })
                 end)
             end)
         end)
-    end, { desc = "Rename file + update imports" })
+    end, { desc = "Rename file/dir + update imports" })
 
     vim.api.nvim_create_autocmd("FileType", {
         pattern = "neo-tree",
         callback = function(ev)
             vim.keymap.set("n", "<leader>rr", "<cmd>ImportRename<cr>",
-                { buffer = ev.buf, desc = "Rename file + update imports" })
+                { buffer = ev.buf, desc = "Rename + update imports" })
         end,
     })
 end
