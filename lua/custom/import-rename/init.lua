@@ -133,22 +133,36 @@ local function py_path_to_module(root, filepath)
     return rel
 end
 
---- Резолвит относительный импорт в абсолютный модуль.
---- source_mod — модуль файла, в котором встречен импорт (напр. "pkg.sub.mod")
---- dots       — количество точек (1 = ".", 2 = "..", ...)
---- rel_mod    — часть после точек (может быть "" для `from . import ...`)
---- Возвращает абсолютный модуль или nil если dots выходит за корень.
-local function py_resolve_relative(source_mod, dots, rel_mod)
-    local parts = vim.split(source_mod, ".", { plain = true })
-    -- from . — поднимаемся на 1 уровень (до пакета текущего модуля)
-    -- from .. — на 2 и т.д.
-    local levels = dots
-    if levels >= #parts then
-        return nil -- выходим за пределы корня
+--- Определяет пакет файла.
+--- Для __init__.py пакет = сам модуль (он и есть пакет).
+--- Для обычного файла пакет = родительский модуль.
+local function py_get_package(root, filepath)
+    local is_init = filepath:match("/__init__%.py$") ~= nil
+    local mod = py_path_to_module(root, filepath)
+    if is_init then
+        return mod
     end
-    -- Убираем levels компонент с конца
+    local parts = vim.split(mod, ".", { plain = true })
+    if #parts <= 1 then
+        return nil -- top-level модуль, пакета нет
+    end
+    return table.concat(parts, ".", 1, #parts - 1)
+end
+
+--- Резолвит относительный импорт в абсолютный.
+--- source_package — пакет файла (не модуль!)
+--- dots — кол-во точек: 1=".", 2="..", ...
+--- В Python: . = текущий пакет (0 уровней вверх), .. = 1 вверх, ...
+local function py_resolve_relative(source_package, dots, rel_mod)
+    if not source_package then return nil end
+    local parts = vim.split(source_package, ".", { plain = true })
+    local levels_up = dots - 1
+    if levels_up >= #parts then
+        return nil
+    end
+    local n = #parts - levels_up
     local base_parts = {}
-    for i = 1, #parts - levels do
+    for i = 1, n do
         base_parts[i] = parts[i]
     end
     local base = table.concat(base_parts, ".")
@@ -158,17 +172,17 @@ local function py_resolve_relative(source_mod, dots, rel_mod)
     return base
 end
 
---- Превращает абсолютный модуль обратно в относительную запись
---- относительно source_mod с заданным количеством dots.
---- Возвращает dots_str, rel_part
-local function py_make_relative(source_mod, abs_mod, dots)
-    local parts = vim.split(source_mod, ".", { plain = true })
-    local levels = dots
-    if levels >= #parts then
+--- Обратная операция: абсолютный модуль → относительный с dots точками.
+local function py_make_relative(source_package, abs_mod, dots)
+    if not source_package then return nil, nil end
+    local parts = vim.split(source_package, ".", { plain = true })
+    local levels_up = dots - 1
+    if levels_up >= #parts then
         return nil, nil
     end
+    local n = #parts - levels_up
     local base_parts = {}
-    for i = 1, #parts - levels do
+    for i = 1, n do
         base_parts[i] = parts[i]
     end
     local base = table.concat(base_parts, ".")
@@ -197,7 +211,7 @@ local function replace_module_ref(text, old_mod, new_mod)
     return text, false
 end
 
-local function py_replace_imports(content, old_mod, new_mod, source_file_mod)
+local function py_replace_imports(content, old_mod, new_mod, source_package)
     local changed = false
     local lines = vim.split(content, "\n", { plain = true })
     local result = {}
@@ -218,31 +232,27 @@ local function py_replace_imports(content, old_mod, new_mod, source_file_mod)
 
         -- =======================================================
         -- Относительные импорты: from .xxx import ... / from .. import ...
-        -- Паттерн ловит leading whitespace, "from", точки, опц. модуль, и " import..."
         -- =======================================================
         local rel_pre, rel_dots, rel_mod_part, rel_rest =
             line:match("^(%s*from%s+)(%.+)([%w_%.]*)([ \t]+import.*)$")
 
-        if rel_pre and source_file_mod then
+        if rel_pre and source_package then
             local ndots = #rel_dots
-            -- Резолвим в абсолютный модуль
-            local abs_from = py_resolve_relative(source_file_mod, ndots, rel_mod_part)
+            local abs_from = py_resolve_relative(source_package, ndots, rel_mod_part)
             if abs_from then
-                -- Проверяем: совпадает ли abs_from с old_mod или old_mod.*
                 local replaced_from, did_from = replace_module_ref(abs_from, old_mod, new_mod)
                 if did_from then
-                    -- Пробуем выразить обратно как относительный с тем же кол-вом точек
-                    local new_dots_str, new_rel = py_make_relative(source_file_mod, replaced_from, ndots)
+                    -- Пробуем сохранить относительность с тем же кол-вом точек
+                    local new_dots_str, new_rel = py_make_relative(source_package, replaced_from, ndots)
                     if new_dots_str then
                         new_line = rel_pre .. new_dots_str .. new_rel .. rel_rest
-                        changed = true
                     else
-                        -- Не удалось сохранить относительность — пишем абсолютный
+                        -- Не получилось — пишем абсолютный
                         new_line = rel_pre .. replaced_from .. rel_rest
-                        changed = true
                     end
+                    changed = true
                 elseif old_parent and abs_from == old_parent then
-                    -- from .parent import leaf — может надо заменить leaf
+                    -- from .parent import leaf
                     local kw, import_list = rel_rest:match("^([ \t]+import%s+)(.*)$")
                     if kw and import_list then
                         local new_from_abs = old_parent
@@ -264,7 +274,7 @@ local function py_replace_imports(content, old_mod, new_mod, source_file_mod)
                             end
                         end
                         if need then
-                            local new_dots_str, new_rel = py_make_relative(source_file_mod, new_from_abs, ndots)
+                            local new_dots_str, new_rel = py_make_relative(source_package, new_from_abs, ndots)
                             if new_dots_str then
                                 new_line = rel_pre .. new_dots_str .. new_rel .. kw .. new_list
                             else
@@ -277,7 +287,7 @@ local function py_replace_imports(content, old_mod, new_mod, source_file_mod)
             end
         else
             -- =======================================================
-            -- Абсолютные импорты (оригинальная логика)
+            -- Абсолютные импорты
             -- =======================================================
             local from_pre, from_mod, from_rest =
                 line:match("^(%s*from%s+)([%w_%.]+)(%s+import.*)$")
@@ -417,9 +427,8 @@ local function do_rename_and_update(old_path, new_path)
                 if fp ~= old_path and fp ~= new_path then
                     local content = read_file(fp)
                     if content then
-                        -- Вычисляем модуль текущего файла для резолва относительных импортов
-                        local source_mod = py_path_to_module(root, fp)
-                        local nc, did = py_replace_imports(content, old_mod, new_mod, source_mod)
+                        local source_package = py_get_package(root, fp)
+                        local nc, did = py_replace_imports(content, old_mod, new_mod, source_package)
                         if did then
                             write_file(fp, nc)
                             total = total + 1
