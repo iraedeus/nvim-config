@@ -29,7 +29,7 @@ function M.replace_imports(content, old_imp, new_imp)
     for _, node in query:iter_captures(tree:root(), content) do
         local _, _, s = node:start()
         local _, _, e = node:end_()
-        local path = content:sub(s + 2, e - 1) -- без кавычек
+        local path = content:sub(s + 2, e - 1)
 
         local new_text
         if path == old_imp then
@@ -88,7 +88,6 @@ function M.parse_imports(content)
         }
     end
 
-    -- grouped: import ( ... )
     for block in content:gmatch("import%s*%((.-)%)") do
         for line in block:gmatch("[^\n]+") do
             local a, p = line:match('^%s*(%w+)%s+"([^"]+)"%s*$')
@@ -97,7 +96,6 @@ function M.parse_imports(content)
         end
     end
 
-    -- single: import "path" / import alias "path"
     for full_line in content:gmatch("[^\n]+") do
         if full_line:match("^%s*import%s+") and not full_line:match("^%s*import%s*%(") then
             local a, p = full_line:match('^%s*import%s+(%w+)%s+"([^"]+)"%s*$')
@@ -113,26 +111,20 @@ end
 
 function M.refactor_file(content, old_imp, new_imp)
     local changed      = false
-    local old_dir_name = old_imp:match("([^/]+)$")
     local new_dir_name = new_imp:match("([^/]+)$")
 
-    -- определяем пакеты без алиаса, которым нужен rename usage
     local needs_rename = {}
     for _, imp in ipairs(M.parse_imports(content)) do
-        if not imp.alias
-            and (imp.path == old_imp or imp.path:sub(1, #old_imp + 1) == old_imp .. "/")
-            and imp.path == old_imp then
+        if not imp.alias and imp.path == old_imp then
             needs_rename[imp.path:match("([^/]+)$")] = new_dir_name
         end
     end
 
-    -- import paths
     local nc, did = M.replace_imports(content, old_imp, new_imp)
     if did then
         content = nc; changed = true
     end
 
-    -- usages
     for old_name, new_name in pairs(needs_rename) do
         nc, did = M.replace_usage(content, old_name, new_name)
         if did then
@@ -187,6 +179,24 @@ function M.collect_pending(root, old_path, new_path, is_dir)
                 if did_any then
                     pending[#pending + 1] = {
                         filepath = fp, original = original, modified = content,
+                    }
+                end
+            end
+        end
+    end
+
+    -- Обновляем package decl в самом перемещаемом файле (move в другую директорию)
+    if not is_dir then
+        local old_pkg = old_dir:match("([^/]+)$")
+        local new_pkg = new_dir:match("([^/]+)$")
+        if old_pkg and new_pkg and old_pkg ~= new_pkg then
+            local content = utils.read_file(old_path)
+            if content then
+                local original = content
+                local nc, did  = M.replace_package_decl(content, old_pkg, new_pkg)
+                if did then
+                    pending[#pending + 1] = {
+                        filepath = old_path, original = original, modified = nc,
                     }
                 end
             end
