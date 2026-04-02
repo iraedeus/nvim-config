@@ -320,12 +320,10 @@ local function py_replace_imports(content, old_mod, new_mod, source_package)
             goto continue
         end
 
-        local first  = i
-        local last   = block_last(first)
-        local joined = join_block(first, last)
+        local first                               = i
+        local last                                = block_last(first)
+        local joined                              = join_block(first, last)
 
-        -- ── relative from-import ────────────────────────────────�
-        �─────
         local _, rel_dots, rel_mod_part, rel_rest =
             joined:match("^(%s*from%s+)(%.+)([%w_%.]*)([ \t]+import.*)$")
 
@@ -366,7 +364,6 @@ local function py_replace_imports(content, old_mod, new_mod, source_package)
                 end
             end
         else
-            -- ── absolute from-import ──────────────────────────────────
             local _, from_mod, from_rest =
                 joined:match("^(%s*from%s+)([%w_%.]+)(%s+import.*)$")
 
@@ -395,7 +392,6 @@ local function py_replace_imports(content, old_mod, new_mod, source_package)
                     end
                 end
             else
-                -- ── plain import ──────────────────────────────────────
                 local imp_list = joined:match("^%s*import%s+(.+)$")
                 if imp_list then
                     for _, m in
@@ -425,9 +421,6 @@ local function py_replace_imports(content, old_mod, new_mod, source_package)
         ::continue::
     end
 
-    ---------------------------------------------------------------------------
-    -- ★ __all__ string references                                          ★
-    ---------------------------------------------------------------------------
     if old_leaf ~= new_leaf and leaf_swapped then
         local in_all  = false
         local depth   = 0
@@ -508,7 +501,6 @@ local function go_replace_imports(content, old_imp, new_imp)
 end
 
 -- ============================================================
--- Core: переименование + обновление импортов
 -- ============================================================
 
 local function do_rename_and_update(old_path, new_path)
@@ -607,39 +599,41 @@ end
 -- ============================================================
 
 function M.setup()
+    vim.api.nvim_create_user_command("ImportRename", function()
+        local filepath, err = get_neotree_file_path()
+        if not filepath then
+            vim.notify("import-rename: " .. (err or "unknown error"), vim.log.levels.ERROR)
+            return
+        end
+
+        local old_name = vim.fn.fnamemodify(filepath, ":t")
+        local dir = vim.fn.fnamemodify(filepath, ":h")
+
+        vim.ui.input({
+            prompt = "Rename to: ",
+            default = old_name,
+        }, function(new_name)
+            vim.schedule(function()
+                if not new_name or new_name == "" or new_name == old_name then
+                    return
+                end
+                local new_path = path_join(dir, new_name)
+                do_rename_and_update(filepath, new_path)
+
+                pcall(function()
+                    require("neo-tree.command").execute({ action = "refresh" })
+                end)
+            end)
+        end)
+    end, { desc = "Rename file + update imports" })
+
     vim.api.nvim_create_autocmd("FileType", {
         pattern = "neo-tree",
         callback = function(ev)
-            vim.keymap.set("n", "<leader>rr", function()
-                local filepath, err = get_neotree_file_path()
-                if not filepath then
-                    vim.notify("import-rename: " .. (err or "unknown error"), vim.log.levels.ERROR)
-                    return
-                end
-
-                local old_name = vim.fn.fnamemodify(filepath, ":t")
-                local dir = vim.fn.fnamemodify(filepath, ":h")
-
-                vim.ui.input({
-                    prompt = "Rename to: ",
-                    default = old_name,
-                }, function(new_name)
-                    vim.schedule(function()
-                        if not new_name or new_name == "" or new_name == old_name then
-                            return
-                        end
-                        local new_path = path_join(dir, new_name)
-                        do_rename_and_update(filepath, new_path)
-
-                        pcall(function()
-                            require("neo-tree.command").execute({ action = "refresh" })
-                        end)
-                    end)
-                end)
-            end, { buffer = ev.buf, desc = "Rename file + update imports" })
+            vim.keymap.set("n", "<leader>rr", "<cmd>ImportRename<cr>",
+                { buffer = ev.buf, desc = "Rename file + update imports" })
         end,
     })
 end
 
 return M
-
