@@ -37,13 +37,13 @@ function M.setup()
         local rel  = path:sub(#root + 2)
 
         vim.ui.input({
-            prompt  = "Move to: ",
+            prompt  = "Move to (relative to project root): ",
             default = rel,
         }, function(new_rel)
             vim.schedule(function()
                 if not new_rel or new_rel == "" or new_rel == rel then return end
 
-                -- trailing / → подставляем оригинальное имя файла/папки
+                -- trailing / для файла → подставляем имя
                 if new_rel:match("/$") and node_type ~= "directory" then
                     new_rel = new_rel .. vim.fn.fnamemodify(path, ":t")
                 end

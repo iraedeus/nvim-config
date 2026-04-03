@@ -1,8 +1,6 @@
 local M     = {}
 local utils = require("custom.import-rename.utils")
 
--- ─── module / import helpers ───────────────────────────────
-
 function M.get_module_name(root)
     local content = utils.read_file(utils.path_join(root, "go.mod"))
     if not content then return nil end
@@ -14,8 +12,6 @@ function M.dir_to_import(root, go_module, dirpath)
     if not rel or rel == "" then return go_module end
     return go_module .. "/" .. rel
 end
-
--- ─── treesitter import replacement ─────────────────────────
 
 function M.replace_imports(content, old_imp, new_imp)
     local ok, parser = pcall(vim.treesitter.get_string_parser, content, "go")
@@ -52,8 +48,6 @@ function M.replace_imports(content, old_imp, new_imp)
     return content, true
 end
 
--- ─── usage + package decl ──────────────────────────────────
-
 function M.replace_usage(content, old_name, new_name)
     if old_name == new_name then return content, false end
     local pat  = "(%f[%w_])" .. vim.pesc(old_name) .. "(%s*%.)"
@@ -75,11 +69,8 @@ function M.replace_package_decl(content, old_name, new_name)
     return content, false
 end
 
--- ─── parse imports (regex) ─────────────────────────────────
-
 function M.parse_imports(content)
     local result = {}
-
     local function add(alias, path)
         result[#result + 1] = {
             path     = path,
@@ -107,8 +98,6 @@ function M.parse_imports(content)
     return result
 end
 
--- ─── refactor one file ────────────────────────────────────
-
 function M.refactor_file(content, old_imp, new_imp)
     local changed      = false
     local new_dir_name = new_imp:match("([^/]+)$")
@@ -135,8 +124,6 @@ function M.refactor_file(content, old_imp, new_imp)
     return content, changed
 end
 
--- ─── collect_pending (вызывается из core) ──────────────────
-
 function M.collect_pending(root, old_path, new_path, is_dir)
     if not is_dir and not old_path:match("%.go$") then return {} end
 
@@ -161,7 +148,6 @@ function M.collect_pending(root, old_path, new_path, is_dir)
                 local original = content
                 local did_any  = false
 
-                -- package decl для файлов непосредственно в переименованной директории
                 if is_dir and fp:sub(1, #old_prefix) == old_prefix
                     and not fp:sub(#old_prefix + 1):find("/") then
                     local nc, did = M.replace_package_decl(
@@ -185,18 +171,17 @@ function M.collect_pending(root, old_path, new_path, is_dir)
         end
     end
 
-    -- Обновляем package decl в самом перемещаемом файле (move в другую директорию)
+    -- Package decl в самом перемещаемом файле (move в другую директорию)
     if not is_dir then
         local old_pkg = old_dir:match("([^/]+)$")
         local new_pkg = new_dir:match("([^/]+)$")
         if old_pkg and new_pkg and old_pkg ~= new_pkg then
             local content = utils.read_file(old_path)
             if content then
-                local original = content
-                local nc, did  = M.replace_package_decl(content, old_pkg, new_pkg)
+                local nc, did = M.replace_package_decl(content, old_pkg, new_pkg)
                 if did then
                     pending[#pending + 1] = {
-                        filepath = old_path, original = original, modified = nc,
+                        filepath = old_path, original = content, modified = nc,
                     }
                 end
             end

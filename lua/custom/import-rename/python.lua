@@ -1,6 +1,8 @@
 local M     = {}
 local utils = require("custom.import-rename.utils")
 
+-- ─── module / package helpers ──────────────────────────────
+
 function M.path_to_module(root, filepath)
     local rel = filepath:sub(#root + 2)
     rel = rel:gsub("%.py$", ""):gsub("/__init__$", ""):gsub("/", ".")
@@ -50,6 +52,7 @@ local function replace_module_ref(text, old_mod, new_mod)
     return text, false
 end
 
+-- ─── multiline block helpers ───────────────────────────────
 
 local function block_last(lines, start)
     local last, depth = start, 0
@@ -79,6 +82,7 @@ local function join_block(lines, first, last)
     return table.concat(parts, " "):gsub("%s+", " "):match("^%s*(.-)%s*$")
 end
 
+-- ─── inline import extraction ──────────────────────────────
 
 local function extract_inline_prefix(line)
     for _, sep in ipairs({ ";%s*", ":%s*" }) do
@@ -90,11 +94,13 @@ local function extract_inline_prefix(line)
     return nil, nil
 end
 
+-- ─── alias detection ───────────────────────────────────────
 
 local function name_has_alias(text, name)
     return text:match("%f[%w_]" .. vim.pesc(name) .. "%f[^%w_]%s+as%s+[%w_]+") ~= nil
 end
 
+-- ─── in-place line replacements ────────────────────────────
 
 local function swap_from_module(lines, idx, old_str, new_str)
     local pre, post = lines[idx]:match(
@@ -140,6 +146,7 @@ local function swap_leaf(lines, first, last, oname, nname)
     return any
 end
 
+-- ─── __all__ pass ──────────────────────────────────────────
 
 local function update_dunder_all(lines, old_leaf, new_leaf)
     if old_leaf == new_leaf then return false end
@@ -178,6 +185,7 @@ local function update_dunder_all(lines, old_leaf, new_leaf)
     return any
 end
 
+-- ─── body refactoring ──────────────────────────────────────
 
 local function apply_body_renames(lines, leaf_rename, dotted_renames)
     local changed = false
@@ -208,6 +216,8 @@ local function apply_body_renames(lines, leaf_rename, dotted_renames)
     end
     return changed
 end
+
+-- ─── main: replace_imports ─────────────────────────────────
 
 function M.replace_imports(content, old_mod, new_mod, source_package)
     local changed          = false
@@ -340,7 +350,6 @@ function M.replace_imports(content, old_mod, new_mod, source_package)
         end
 
         if inline_prefix then lines[first] = inline_prefix .. lines[first] end
-
         i = last + 1
         ::continue::
     end
@@ -359,6 +368,101 @@ function M.replace_imports(content, old_mod, new_mod, source_package)
     return content, false
 end
 
+-- ─── rebase relative imports (for file/dir moves) ─────────
+
+--- Пересчитывает все relative imports файла при перемещении
+--- из old_package в new_package.
+--- skip_prefix: если resolved absolute path начинается с этого —
+--- не трогать (импорт внутри перемещённой директории, остаётся валидным).
+function M.rebase_relative_imports(content, old_package, new_package, skip_prefix)
+    if not old_package then return content, false end
+    if old_package == new_package then return content, false end
+
+    local lines        = vim.split(content, "\n", { plain = true })
+    local changed      = false
+    local max_new_dots = new_package
+        and #vim.split(new_package, ".", { plain = true })
+        or 0
+
+    local i            = 1
+    while i <= #lines do
+        local line          = lines[i]
+        local inline_prefix = nil
+        local has_rel_from  = line:match("^%s*from%s+%.") ~= nil
+
+        if not has_rel_from then
+            local prefix, rest = extract_inline_prefix(line)
+            if prefix and rest:match("^from%s+%.") then
+                inline_prefix = prefix
+                lines[i] = rest
+                line = rest
+                has_rel_from = true
+            end
+        end
+
+        if not has_rel_from then
+            i = i + 1
+            goto continue
+        end
+
+        local first                     = i
+        local last                      = block_last(lines, first)
+        local joined                    = join_block(lines, first, last)
+
+        local _, rel_dots, rel_mod_part =
+            joined:match("^(%s*from%s+)(%.+)([%w_%.]*)")
+
+        if rel_dots then
+            local ndots    = #rel_dots
+            local abs_from = resolve_relative(old_package, ndots, rel_mod_part)
+
+            if abs_from then
+                -- Пропускаем импорты внутри перемещённой директории
+                local should_skip = skip_prefix and (
+                    abs_from == skip_prefix
+                    or abs_from:sub(1, #skip_prefix + 1) == skip_prefix .. "."
+                )
+
+                if not should_skip then
+                    local new_rel = nil
+
+                    -- Пытаемся сделать relative от нового пакета
+                    if new_package then
+                        for try_dots = 1, max_new_dots do
+                            local ds, rl = make_relative(new_package, abs_from, try_dots)
+                            if ds then
+                                new_rel = ds .. rl
+                                break
+                            end
+                        end
+                    end
+
+                    -- Fallback: абсолютный импорт
+                    if not new_rel then
+                        new_rel = abs_from
+                    end
+
+                    local old_rel = rel_dots .. rel_mod_part
+                    if new_rel ~= old_rel then
+                        if swap_from_module(lines, first, old_rel, new_rel) then
+                            changed = true
+                        end
+                    end
+                end
+            end
+        end
+
+        if inline_prefix then lines[first] = inline_prefix .. lines[first] end
+        i = last + 1
+        ::continue::
+    end
+
+    if changed then return table.concat(lines, "\n"), true end
+    return content, false
+end
+
+-- ─── collect_pending ───────────────────────────────────────
+
 function M.collect_pending(root, old_path, new_path, is_dir)
     if not is_dir and not old_path:match("%.py$") then return {} end
 
@@ -366,9 +470,18 @@ function M.collect_pending(root, old_path, new_path, is_dir)
     local new_mod = M.path_to_module(root, new_path)
     if old_mod == new_mod then return {} end
 
-    local pending    = {}
+    local changes    = {} -- filepath → { original, modified }
     local old_prefix = is_dir and (old_path .. "/") or nil
 
+    local function record(fp, original, modified)
+        if changes[fp] then
+            changes[fp].modified = modified
+        else
+            changes[fp] = { original = original, modified = modified }
+        end
+    end
+
+    -- 1. Обновляем импорты во всех внешних файлах
     for _, fp in ipairs(utils.collect_files(root, { ".py" })) do
         if fp ~= old_path and fp ~= new_path then
             local content = utils.read_file(fp)
@@ -381,15 +494,66 @@ function M.collect_pending(root, old_path, new_path, is_dir)
                     pkg = M.get_package(root, fp)
                 end
                 local nc, did = M.replace_imports(content, old_mod, new_mod, pkg)
+                if did then record(fp, content, nc) end
+            end
+        end
+    end
+
+    -- 2. Rebase relative imports в перемещаемых файлах
+    if not is_dir then
+        local old_pkg = M.get_package(root, old_path)
+        local new_pkg = M.get_package(root, new_path)
+        local content = utils.read_file(old_path)
+        if content then
+            local current = content
+            local did_any = false
+
+            -- Абсолютные self-references (редко, но корректно обработать)
+            local nc, did = M.replace_imports(current, old_mod, new_mod, new_pkg)
+            if did then
+                current = nc; did_any = true
+            end
+
+            -- Rebase relative imports
+            if old_pkg and old_pkg ~= new_pkg then
+                nc, did = M.rebase_relative_imports(current, old_pkg, new_pkg, nil)
                 if did then
-                    pending[#pending + 1] = {
-                        filepath = fp, original = content, modified = nc,
-                    }
+                    current = nc; did_any = true
+                end
+            end
+
+            if did_any then record(old_path, content, current) end
+        end
+    else
+        -- Directory move: rebase relative imports, указывающих ЗА пределы директории
+        for _, fp in ipairs(utils.collect_files(old_path, { ".py" })) do
+            local old_file_pkg = M.get_package(root, fp)
+            if old_file_pkg then
+                local rel_in_dir   = fp:sub(#old_path + 2)
+                local new_fp       = new_path .. "/" .. rel_in_dir
+                local new_file_pkg = M.get_package(root, new_fp)
+
+                if old_file_pkg ~= new_file_pkg then
+                    local base = changes[fp] and changes[fp].modified
+                        or utils.read_file(fp)
+                    local orig = changes[fp] and changes[fp].original or base
+                    if base then
+                        local nc, did = M.rebase_relative_imports(
+                            base, old_file_pkg, new_file_pkg, old_mod)
+                        if did then record(fp, orig, nc) end
+                    end
                 end
             end
         end
     end
 
+    -- Конвертируем map → list
+    local pending = {}
+    for fp, c in pairs(changes) do
+        pending[#pending + 1] = {
+            filepath = fp, original = c.original, modified = c.modified,
+        }
+    end
     return pending
 end
 
